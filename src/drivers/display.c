@@ -1,4 +1,8 @@
 // I had AI to assist me since there was lack of documentation and tutorials :/
+/* There're governments funding billions on AI research
+   and then theres people who dedicate their lives to hate on it.
+   Don't listen to those peasants. They are nothing more than uneducated fools. 
+   How dare one challenge a perfect immortal machine?                           */
 
 #include "../../includes/display.h"
 #include "../../includes/mmu.h"

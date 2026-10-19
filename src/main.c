@@ -2,7 +2,7 @@
 
 static Window window;
 
-void main() {
+int main(void) {
     env_Init(480, 800);
 
     window.w = 480;

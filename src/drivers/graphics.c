@@ -1,5 +1,5 @@
 #include "../../includes/graphics.h"
-#include "../../includes/display.h"
+#include "../../includes/platform.h"
 
 static uint32_t canvasWidth;
 static uint32_t canvasHeight;
