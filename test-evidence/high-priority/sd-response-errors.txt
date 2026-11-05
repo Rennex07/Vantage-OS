@@ -1,0 +1,32 @@
+Vantage-OS | SD card-response errors
+Branch: fix/sd-response-errors
+Commit: 33d5e0771ef504c3976a31977a83cdc49589e3b4
+Native test log saved: 2026-11-05T07:16:56+00:00
+
+Rendered test logs, not a desktop screenshot. Workspace paths shortened.
+
+> cmake --build sim/build --config Release
+Release build passed before the CTest run below. Build log omitted.
+
+> ctest --test-dir sim/build -C Release --output-on-failure
+Test project [workspace]/sim/build
+    Start 1: simulator_smoke
+1/3 Test #1: simulator_smoke ..................   Passed    0.32 sec
+    Start 2: touch_driver
+2/3 Test #2: touch_driver .....................   Passed    0.05 sec
+    Start 3: sd_response
+3/3 Test #3: sd_response ......................   Passed    0.04 sec
+
+100% tests passed out of 3
+
+Total Test time (real) =   0.50 sec
+
+Regression coverage: Card errors stop reads before buffer writes; valid R1/OCR responses pass.
+
+ARM verification (Zig/Clang):
+PASS: AArch64 compile and cross-link (delay dependency explicitly supplied)
+
+LIMITATIONS:
+Cross-link explicitly supplies delay.c, omitted by the current Makefile.
+SD tests use mocked registers; they do not validate SD-card hardware.
+Raspberry Pi boot and hardware were not tested.

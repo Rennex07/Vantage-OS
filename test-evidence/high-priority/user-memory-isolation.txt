@@ -1,0 +1,33 @@
+Vantage-OS | User/kernel memory isolation
+Branch: fix/user-memory-isolation
+Commit: 51671717e0938958ffd1cb0397c2736ddc73c30e
+Native test log saved: 2026-11-05T07:16:52+00:00
+
+Rendered test logs, not a desktop screenshot. Workspace paths shortened.
+
+> cmake --build sim/build --config Release
+Release build passed before the CTest run below. Build log omitted.
+
+> ctest --test-dir sim/build -C Release --output-on-failure
+Test project [workspace]/sim/build
+    Start 1: simulator_smoke
+1/3 Test #1: simulator_smoke ..................   Passed    0.80 sec
+    Start 2: touch_driver
+2/3 Test #2: touch_driver .....................   Passed    0.16 sec
+    Start 3: user_memory
+3/3 Test #3: user_memory ......................   Passed    0.08 sec
+
+100% tests passed out of 3
+
+Total Test time (real) =   2.11 sec
+
+Regression coverage: Page-table permissions, user buffer boundaries and syscall pointer checks.
+
+ARM verification (Zig/Clang):
+PASS: ELF user region, user stack, kernel stack, page tables and BSS boundaries
+PASS: AArch64 compile and cross-link (delay dependency explicitly supplied)
+
+LIMITATIONS:
+Cross-link explicitly supplies delay.c, omitted by the current Makefile.
+Native tests and ELF layout checks do not validate ARM access faults.
+Raspberry Pi boot and hardware were not tested.
