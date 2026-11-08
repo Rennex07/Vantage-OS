@@ -20,3 +20,5 @@ void put_pixel(uint32_t x, uint32_t y, uint32_t color);
 void fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
 void fb_wait_frame(void);
 void fb_swap(void);
+struct V3d;
+uint32_t fb_enable_v3d(struct V3d* gpu);

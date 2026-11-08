@@ -1,4 +1,5 @@
 #include "../../includes/mmu.h"
+#include "../../includes/memory.h"
 
 #define ATTR_DEVICE 0
 #define ATTR_NORMAL 1
@@ -22,7 +23,10 @@ void mmu_populate_tables(uint64_t level1[4], uint64_t level2[4][512],
             uint64_t addr = (g << 30) | (i << 21);
             uint64_t desc = addr | (1ULL << 10) | UXN | PXN | 1;
 
-            if (addr == bootStart || addr >= PERIPHERAL_START) {
+            if (!mm_block_mapped(addr)) {
+                level2[g][i] = 0; /* RAM holes and coarse no-map reservations fault. */
+                continue;
+            } else if (addr == bootStart || addr >= PERIPHERAL_START) {
                 desc |= (ATTR_DEVICE << 2) | (2ULL << 8);
             } else if (addr + BLOCK_SIZE > fbStart && addr < fbEnd) {
                 desc |= (ATTR_NONCACHED << 2) | (2ULL << 8);

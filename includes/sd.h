@@ -1,38 +1,68 @@
-/*
- * Copyright (C) 2018 bzt (bztsrc@github)
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- *
- */
-
-// https://github.com/bztsrc/raspi3-tutorial/blob/master/0B_readsector/sd.h (this code is NOT completely mine)
-
 #pragma once
-
 #include "std.h"
-#include "io.h"
 
-#define SD_OK 0
-#define SD_TIMEOUT -1
-#define SD_ERROR -2
+#define SD_BLOCK_SIZE 512U
+#define SD_READ_MAX_BLOCKS 128U
+#define SD_ERASE_MAX_BLOCKS 65536U
 
-int sd_init();
-int sd_readBlock(unsigned int lba, unsigned char* buf, unsigned int num);
+enum {
+    SD_OK = 0,
+    SD_TIMEOUT = -1,
+    SD_ERROR = -2,
+    SD_INVALID = -3,
+    SD_UNSUPPORTED = -4,
+    SD_NOT_READY = -5,
+    SD_WRITE_PROTECTED = -6
+};
+
+/* Offsets are relative to the host controller. Callbacks must return promptly.
+ * now_us is a monotonic wrapping 64-bit microsecond counter; delay_us waits at
+ * least the requested interval. The caller exclusively owns the controller. */
+typedef struct {
+    void* context;
+    uint32_t (*read32)(void* context, uint32_t offset);
+    void (*write32)(void* context, uint32_t offset, uint32_t value);
+    uint64_t (*now_us)(void* context);
+    void (*delay_us)(void* context, uint32_t microseconds);
+} SdIo;
+
+typedef struct {
+    SdIo io;
+    uint64_t sectors;
+    uint32_t base_clock_hz, clock_hz;
+    uint32_t rca, block_addressed, ready;
+    uint32_t last_interrupt, last_response;
+    uint32_t erase_sectors, write_protected, command_classes;
+} SdCard;
+
+/* SD v2 SDSC/SDHC/SDXC, 1-bit bus, default speed, programmed I/O.
+ * Use a zero-initialized or previously initialized card and a separate SdIo.
+ * Firmware/board code must establish power, 3.3V signaling and clock routing.
+ * Any hardware/protocol failure invalidates the card until reinitialized. */
+int sd_card_init(SdCard* card, const SdIo* io, uint32_t base_clock_hz);
+/* Returns SD_OK only after all sectors complete. On error the destination can
+ * contain partial data and must be discarded. Invalid arguments cause no I/O. */
+int sd_card_read(SdCard* card, uint64_t lba, uint32_t count,
+                  void* buffer, size_t buffer_bytes);
+/* Single-sector CMD24 transactions. A failed request may have changed sectors;
+ * never retry an uncertain filesystem commit without remount/recovery. */
+int sd_card_write(SdCard* card, uint64_t lba, uint32_t count,
+                  const void* buffer, size_t buffer_bytes);
+/* CMD13 readiness/status check; does not enable an optional card write cache. */
+int sd_card_sync(SdCard* card);
+/* Destructive, inclusive CMD32/33 range followed by normal CMD38 (not discard).
+ * Range must align to CSD erase units. Erased byte values are unspecified. */
+int sd_card_erase(SdCard* card, uint64_t lba, uint32_t count);
+
+/* Pi 4 EMMC2 adapter: boot/core-0-pinned tasks, EL1, masked exceptions,
+ * exclusive ownership. Movable tasks are rejected even while on core 0.
+ * The input clock must be obtained from firmware/board configuration and remain
+ * fixed. Normal boot deliberately does not call this unvalidated hardware path. */
+int sd_init(uint32_t base_clock_hz);
+int sd_read_blocks(uint64_t lba, uint32_t count, void* buffer, size_t buffer_bytes);
+int sd_write_blocks(uint64_t lba, uint32_t count, const void* buffer, size_t buffer_bytes);
+int sd_sync(void);
+int sd_erase_blocks(uint64_t lba, uint32_t count);
+uint64_t sd_sector_count(void);
+/* Legacy byte-count API: caller supplies room for count * 512 bytes. */
+int sd_readBlock(unsigned int lba, unsigned char* buffer, unsigned int count);

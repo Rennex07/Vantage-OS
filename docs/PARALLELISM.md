@@ -7,7 +7,11 @@ Workers enter EL1 and wait for immutable shared MMU tables through a Device
 boot gate before using cached job state. A synchronous four-way batch runs one
 slice on every core, including core 0. Large CPU fills and framebuffer copies
 use disjoint rows; core 0 retains input/UART/mailbox/presentation ownership.
-This is not a process scheduler or GPU renderer. The original core-1 startup
+The worker facility also hosts a cooperative four-core task scheduler. During
+task sessions, synchronous raster batches reserve idle workers or use their
+serial fallback rather than wait on occupied task cores. See
+[SCHEDULER.md](SCHEDULER.md). This is not a GPU
+renderer. The original core-1 startup
 was reported working on hardware by the maintainer; the new worker system
 still needs Pi 4 runtime and cache-coherency validation.
 
@@ -29,6 +33,11 @@ with commit/image hashes and full logs. Desktop threads or mocked ARM tests
 must be labelled separately from hardware results.
 
 ## GPU: existing display versus acceleration
+
+An experimental V3D 4.2 clear/copy driver now provides private GPU mappings,
+bounded command submission and an opt-in pixel self-test. See the
+[hardware driver guide](HARDWARE.md). Physical Pi validation remains pending;
+the default renderer still runs on the CPU.
 
 `drivers/video/display.c` already requests a framebuffer and virtual-offset
 changes from VideoCore firmware through the property mailbox. Drawing and
@@ -54,24 +63,23 @@ References:
 - [Mesa V3D driver and Pi 4 hardware notes](https://docs.mesa3d.org/drivers/v3d.html)
 - [Linux V3D driver: memory, jobs and interrupts](https://docs.kernel.org/gpu/v3d.html)
 
-## Process manager: plan only
+## Task scheduler and process-management stages
 
 Start with kernel task lifecycle and scheduling, not a graphical task-manager
-application. The current kernel starts one built-in EL0 function; it has no
-task allocator, executable loader, timer-driven scheduler or per-process
-address spaces. The existing shared code mapping and single user-memory region
+application. The kernel schedules trusted cooperative tasks and starts one
+built-in EL0 function; it has no executable loader, timer-driven scheduler or
+per-process address spaces. The existing shared code mapping and single user-memory region
 are not independent process isolation.
 
-### 1. Single-core cooperative kernel tasks
+### 1. Four-core cooperative tasks: implemented, Pi validation pending
 
-Use a small fixed-size task table first: task ID, state, entry, stack bounds and
-saved context. Define create, yield, exit and join/reap semantics, including
-invalid IDs and a full table. Keep runnable, running, blocked and exited states
-explicit, and include an idle task. Do not introduce migration or preemption.
-
-Verify two tasks make progress, saved registers and stacks survive switching,
-an exited task never resumes, and slots are reclaimed only after the task can
-no longer execute. Integrate stack checks without claiming complete protection.
+Thirty-two fixed task slots provide create/yield/exit/join/reap, generation-tagged
+IDs and separate privileged stacks. Each of the four cores can claim runnable
+work allowed by its affinity, with migration at voluntary yield/block boundaries.
+Core 0 coordinates global quiescence; existing device tasks stay pinned there.
+EL0 exposes ID/yield/exit only. See [the task contract and tests](SCHEDULER.md).
+Host threads and linked ARM models cover progress, migration, preserved context
+and safe slot reclamation; physical Pi scheduling validation is still required.
 
 ### 2. Interrupt foundation and preemption
 
@@ -94,14 +102,13 @@ Acceptance: two processes have independent writable memory, valid syscalls work,
 invalid access faults cannot modify protected memory, and exit frees owned
 resources. Verify this on ARM, not only by inspecting page-table descriptors.
 
-### 4. Multicore scheduling
+### 4. Further multicore policies
 
-Build on the coherent worker foundation, initially with pinned tasks and a
-simple locked runnable queue. Specify which core owns each task and how a
-remote wakeup is delivered. Test that no task runs on two cores at once, blocked
-tasks wake without lost signals, and exit cannot free a stack still in use.
-Task migration and load balancing come later, with explicit TLB and FP/SIMD
-state handling.
+After hardware acceptance, evaluate real workloads before adding priorities,
+per-core run queues or scheduling domains. Process migration will need explicit
+address-space/TLB ownership beyond the current shared-map cooperative model.
+Preserve the no-double-dispatch and safe stack-reclamation invariants when adding
+preemption or changing queue design.
 
 GPU rendering is not a prerequisite for this process manager. Each stage should
 be reviewed and validated separately rather than shipped as one large change.

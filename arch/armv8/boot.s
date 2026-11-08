@@ -16,6 +16,9 @@ _start:
     b 1b
 
 2:
+    // Preserve the firmware DTB pointer across EL setup and BSS clearing.
+    mov x20, x0
+    msr daifset, #0xf
     mrs x0, CurrentEL
     lsr x0, x0, #2
     cmp x0, #2
@@ -34,9 +37,51 @@ _start:
     eret
 
 el1_entry:
+    msr spsel, #1
     mov x0, #(3 << 20)
     msr cpacr_el1, x0
     isb
+
+    // Check the complete DTB before writing even the file-backed boot stack.
+    mrs x0, sctlr_el1
+    tbnz x0, #0, boot_memory_rejected
+    tbnz x0, #2, boot_memory_rejected
+    ldr x1, =_end
+    cmp x20, x1
+    b.lo boot_memory_rejected
+    tst x20, #7
+    b.ne boot_memory_rejected
+    mov x2, #0xfc000000
+    sub x3, x2, #40
+    cmp x20, x3
+    b.hi boot_memory_rejected
+    ldr w3, [x20]
+    rev w3, w3
+    ldr w4, =0xd00dfeed
+    cmp w3, w4
+    b.ne boot_memory_rejected
+    ldr w3, [x20, #4]
+    rev w3, w3
+    cmp w3, #40
+    b.lo boot_memory_rejected
+    mov w4, #0x200000
+    cmp w3, w4
+    b.hi boot_memory_rejected
+    add x3, x20, x3
+    cmp x3, x2
+    b.hi boot_memory_rejected
+
+    ldr x0, =vector_table
+    msr vbar_el1, x0
+    isb
+    // This stack is in the loaded image, not the unchecked zero-fill tail.
+    ldr x1, =__boot_stack_top
+    mov sp, x1
+    mov x0, x20
+    ldr x1, =__bss_start
+    ldr x2, =__bss_end
+    bl mm_boot_validate
+    cbz w0, boot_memory_rejected
 
     ldr x1, =__kernel_stack_top
     mov sp, x1
@@ -50,12 +95,15 @@ el1_entry:
     cbnz w2, 3b
 
 4:
-    ldr x0, =vector_table
-    msr vbar_el1, x0
-    isb
-
+    mov x0, x20
     bl main
     b 1b
+
+.global boot_memory_rejected
+boot_memory_rejected:
+    // UART initialization needs validated memory. Reject without further writes.
+    wfe
+    b boot_memory_rejected
 
 .macro vector target
     .balign 0x80
@@ -141,7 +189,15 @@ el0_sync_exception:
 .global enter_user_space
 enter_user_space:
     msr elr_el1, x0
-    mov x2, #0x0
+    // Interrupt delivery is not configured yet; keep tasks non-preemptible.
+    mov x2, #0x3c0
     msr spsr_el1, x2
     msr sp_el0, x1
+    adr x30, user_task_returned
     eret
+
+user_task_returned:
+    mov x0, #0
+    mov x8, #18 // SYS_TASK_EXIT
+    svc #0
+    b user_task_returned

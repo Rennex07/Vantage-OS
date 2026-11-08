@@ -230,6 +230,16 @@ class StartupTests(unittest.TestCase):
 
         from unicorn import UC_HOOK_MEM_WRITE
         u.hook_add(UC_HOOK_MEM_WRITE, gate_store)
+        # Isolate register/gate sequencing from the firmware-discovery state
+        # machine. memory_management.py tests the actual mapping policy.
+        def mapping_policy(ins):
+            if ins.address == IMAGE.symbols["mm_block_mapped"]:
+                u.reg_write(regs.UC_ARM64_REG_X0, 1)
+                u.reg_write(regs.UC_ARM64_REG_PC, u.reg_read(regs.UC_ARM64_REG_X30))
+                return True
+            return False
+
+        execution.callback = mapping_policy
         u.emu_start(IMAGE.symbols["mmu_init"], RETURN, count=200000)
         self.assertEqual(u.reg_read(regs.UC_ARM64_REG_PC), RETURN)
         self.assertEqual(gate_writes, [1])
@@ -259,9 +269,20 @@ class StartupTests(unittest.TestCase):
         for control in (1, 4, 5):
             execution = Execution(IMAGE, control=control)
             u = execution.u
+            u.reg_write(regs.UC_ARM64_REG_SP, IMAGE.symbols["__kernel_stack_top"])
             u.reg_write(regs.UC_ARM64_REG_X30, RETURN)
+            halted = []
+
+            def reject(ins):
+                if ins.address == IMAGE.symbols["mm_halt"]:
+                    halted.append(True)
+                    u.emu_stop()
+                    return True
+                return False
+
+            execution.callback = reject
             execution.run("mmu_init")
-            self.assertEqual(u.reg_read(regs.UC_ARM64_REG_PC), RETURN)
+            self.assertTrue(halted)
             self.assertNotIn("ttbr0_el1", execution.system)
             self.assertEqual(struct.unpack("<I", u.mem_read(
                 IMAGE.symbols["secondary_mmu_ready"], 4))[0], 0)
@@ -325,6 +346,12 @@ class StartupTests(unittest.TestCase):
 
                 def callback(ins):
                     addr = ins.address
+                    # This test isolates secondary release sequencing. The MM
+                    # harness separately executes real DTB discovery and boot.
+                    if addr == IMAGE.symbols["mm_prepare"]:
+                        u.reg_write(regs.UC_ARM64_REG_X0, 1)
+                        u.reg_write(regs.UC_ARM64_REG_PC, u.reg_read(regs.UC_ARM64_REG_X30))
+                        return True
                     if addr == IMAGE.symbols["uart_init"]:
                         u.reg_write(regs.UC_ARM64_REG_PC, u.reg_read(regs.UC_ARM64_REG_X30))
                         return True

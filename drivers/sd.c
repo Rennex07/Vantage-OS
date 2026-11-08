@@ -1,434 +1,317 @@
-/*
- * Copyright (C) 2018 bzt (bztsrc@github)
- *
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use, copy,
- * modify, merge, publish, distribute, sublicense, and/or sell copies
- * of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- *
- */
-
-// https://github.com/bztsrc/raspi3-tutorial/blob/master/0B_readsector/sd.c (this code is NOT completely mine)
-
+/* SD command/state engine. Register and protocol references: docs/SD.md. */
 #include "../includes/sd.h"
-#include "../kernel/sched/delays/delay.h"
-#include "../includes/io.h"
 
-#ifndef VANTAGE_SD_TEST
-#define EMMC_BASE 0xFE340000
-#define EMMC_ARG2 ((volatile unsigned int*)(EMMC_BASE + 0x00))
-#define EMMC_BLKSIZECNT ((volatile unsigned int*)(EMMC_BASE + 0x04))
-#define EMMC_ARG1 ((volatile unsigned int*)(EMMC_BASE + 0x08))
-#define EMMC_CMDTM ((volatile unsigned int*)(EMMC_BASE + 0x0C))
-#define EMMC_RESP0 ((volatile unsigned int*)(EMMC_BASE + 0x10))
-#define EMMC_RESP1 ((volatile unsigned int*)(EMMC_BASE + 0x14))
-#define EMMC_RESP2 ((volatile unsigned int*)(EMMC_BASE + 0x18))
-#define EMMC_RESP3 ((volatile unsigned int*)(EMMC_BASE + 0x1C))
-#define EMMC_DATA ((volatile unsigned int*)(EMMC_BASE + 0x20))
-#define EMMC_STATUS ((volatile unsigned int*)(EMMC_BASE + 0x24))
-#define EMMC_CTRL0 ((volatile unsigned int*)(EMMC_BASE + 0x28))
-#define EMMC_CTRL1 ((volatile unsigned int*)(EMMC_BASE + 0x2C))
-#define EMMC_INTRPT ((volatile unsigned int*)(EMMC_BASE + 0x30))
-#define EMMC_INT_MASK ((volatile unsigned int*)(EMMC_BASE + 0x34))
-#define EMMC_INT_EN ((volatile unsigned int*)(EMMC_BASE + 0x38))
-#define EMMC_CTRL2 ((volatile unsigned int*)(EMMC_BASE + 0x3C))
-#define EMMC_SLOTISR_VER ((volatile unsigned int*)(EMMC_BASE + 0xFC))
-#endif
+enum {
+    BLOCK = 0x04, ARGUMENT = 0x08, COMMAND = 0x0c, RESPONSE = 0x10,
+    DATA = 0x20, STATE = 0x24, HOST = 0x28, CLOCK = 0x2c,
+    INTERRUPT = 0x30, STATUS_ENABLE = 0x34, SIGNAL_ENABLE = 0x38,
+    VERSION = 0xfc
+};
 
-// command flags
+#define BIT(n) (1U << (n))
+#define COMMAND_BUSY BIT(0)
+#define DATA_BUSY BIT(1)
+#define CLOCK_OUTPUT BIT(2)
+#define RESET_ALL BIT(24)
+#define IRQ_COMMAND BIT(0)
+#define IRQ_TRANSFER BIT(1)
+#define IRQ_READ BIT(5)
+#define IRQ_WRITE BIT(4)
+#define IRQ_ERRORS 0xffff8000U
+#define IRQ_TIMEOUTS (BIT(16) | BIT(20))
+#define R1_ERRORS 0xfff98008U
+#define COMMAND_TIMEOUT_US 100000U
+#define CLOCK_TIMEOUT_US 150000U
+#define DATA_TIMEOUT_US 1000000U
+#define WRITE_TIMEOUT_US 5000000U
+#define ERASE_TIMEOUT_US 120000000U
+#define POLL_LIMIT 100000U
 
-#define CMD_NEED_APP 0x80000000
-#define CMD_RSPNS_48 0x00020000
-#define CMD_ERRORS_MASK 0xfff9c004
-#define CMD_RCA_MASK 0xffff0000
+enum { RESPONSE_NONE, RESPONSE_LONG, RESPONSE_SHORT, RESPONSE_BUSY };
 
-// commands
-#define CMD_GO_IDLE 0x00000000
-#define CMD_ALL_SEND_CID 0x02010000
-#define CMD_SEND_REL_ADDR 0x03020000
-#define CMD_CARD_SELECT 0x07030000
-#define CMD_SEND_IF_COND 0x08020000
-#define CMD_STOP_TRANS 0x0C030000
-#define CMD_READ_SINGLE 0x11220010
-#define CMD_READ_MULTI 0x12220032
-#define CMD_SET_BLOCKCNT 0x17020000
-#define CMD_APP_CMD 0x37000000
-#define CMD_SET_BUS_WIDTH (0x06020000|CMD_NEED_APP)
-#define CMD_SEND_OP_COND (0x29020000|CMD_NEED_APP)
-#define CMD_SEND_SCR (0x33220010|CMD_NEED_APP)
-
-// status register settings
-#define SR_READ_AVAILABLE 0x00000800
-#define SR_DAT_INHIBIT 0x00000002
-#define SR_CMD_INHIBIT 0x00000001
-#define SR_APP_CMD 0x00000020
-
-// interrupt register settings
-
-#define INT_DATA_TIMEOUT 0x00100000
-#define INT_CMD_TIMEOUT 0x00010000
-#define INT_READ_RDY 0x00000020
-#define INT_CMD_DONE 0x00000001
-#define INT_ERR_MASK 0x017E8000
-
-// control register settings
-#define C0_SPI_MODE_EN 0x00100000
-#define C0_HCTL_HS_EN 0x00000004
-#define C0_HCTL_DWITDH 0x00000002
-#define C1_SRST_DATA 0x04000000
-#define C1_SRST_CMD 0x02000000
-#define C1_SRST_HC 0x01000000
-#define C1_TOUNIT_DIS 0x000f0000
-#define C1_TOUNIT_MAX 0x000e0000
-#define C1_CLK_GENSEL 0x00000020
-#define C1_CLK_EN 0x00000004
-#define C1_CLK_STABLE 0x00000002
-#define C1_CLK_INTLEN 0x00000001
-
-// slotisr_ver values
-#define HOST_SPEC_NUM 0x00ff0000
-#define HOST_SPEC_NUM_SHIFT 16
-#define HOST_SPEC_V3 2
-#define HOST_SPEC_V2 1
-#define HOST_SPEC_V1 0
-
-// scr flags
-#define SCR_SD_BUS_WIDTH_4 0x00000400
-#define SCR_SUPP_SET_BLKCNT 0x02000000
-// for large SDs
-#define SCR_SUPP_CCS 0x00000001
-
-#define ACMD41_VOLTAGE 0x00ff8000
-#define ACMD41_CMD_COMPLETE 0x80000000
-#define ACMD41_CMD_CCS 0x40000000
-#define ACMD41_ARG_HC 0x51ff8000
-
-unsigned long sd_scr[2], sd_ocr, sd_rca, sd_err, sd_hv;
-
-int sd_status(unsigned int mask) {
-    int cnt = 50000; while ((*EMMC_STATUS & mask) && !(*EMMC_INTRPT & INT_ERR_MASK) && cnt--) wait_msec(1);
-
-    return (cnt <= 0 || (*EMMC_INTRPT & INT_ERR_MASK)) ? SD_ERROR : SD_OK;
+static uint32_t read_reg(SdCard* card, uint32_t offset) {
+    return card->io.read32(card->io.context, offset);
 }
 
-int sd_int(unsigned int mask) {
-    unsigned int r, m=mask | INT_ERR_MASK;
-    int cnt = 1000000; while(!(*EMMC_INTRPT & m) && cnt--) wait_msec(1);
-    r = *EMMC_INTRPT;
-
-    if (cnt<=0 || (r & INT_CMD_TIMEOUT) || (r & INT_DATA_TIMEOUT)) {
-        *EMMC_INTRPT = r;
-        return SD_TIMEOUT;
-    }
-
-    if (r & INT_ERR_MASK) {
-        *EMMC_INTRPT = r;
-        return SD_ERROR;
-    }
-
-    *EMMC_INTRPT = mask;
-    return 0;
+static void write_reg(SdCard* card, uint32_t offset, uint32_t value) {
+    card->io.write32(card->io.context, offset, value);
 }
 
-int sd_cmd(unsigned int code, unsigned int arg) {
-    int r = 0;
-    sd_err = SD_OK;
+static uint64_t now(SdCard* card) { return card->io.now_us(card->io.context); }
 
-    if (code & CMD_NEED_APP) {
-        r = sd_cmd(CMD_APP_CMD | CMD_RSPNS_48, sd_rca);
-
-        if (sd_err || !r) {
-            uart_writeText("[ERR] App failed to send SD APP command\n");
-            if (!sd_err) sd_err = SD_ERROR;
-            return 0;
-        }
-
-        code &= ~CMD_NEED_APP;
+static int wait_bits(SdCard* card, uint32_t offset, uint32_t mask,
+                     uint32_t expected, uint32_t timeout) {
+    uint64_t start = now(card);
+    uint32_t attempts;
+    for (attempts = 0; attempts < POLL_LIMIT; attempts++) {
+        if ((read_reg(card, offset) & mask) == expected) return SD_OK;
+        if (now(card) - start >= timeout) break;
+        card->io.delay_us(card->io.context, timeout / POLL_LIMIT > 10 ? timeout / POLL_LIMIT : 10);
     }
-
-    if (sd_status(SR_CMD_INHIBIT)) {
-        uart_writeText("[ERR] EMMC BUSY\n");
-        sd_err = SD_TIMEOUT;
-        
-        return 0;
-    }
-
-    *EMMC_INTRPT = *EMMC_INTRPT;
-    *EMMC_ARG1 = arg;
-    *EMMC_CMDTM = code;
-
-    if (code == CMD_SEND_OP_COND) {
-        wait_msec(100);
-    } else if (code == CMD_SEND_IF_COND || code == CMD_APP_CMD) {
-        wait_msec(100);
-    }
-
-    if ((r = sd_int(INT_CMD_DONE))) {
-        uart_writeText("[ERR] Failed to send EMMC command, code=");
-        uart_writeHex(code);
-        uart_writeText(" INTRPT=");
-        uart_writeHex(*EMMC_INTRPT);
-        uart_writeText(" STATUS=");
-        uart_writeHex(*EMMC_STATUS);
-        uart_writeText(" CTRL0=");
-        uart_writeHex(*EMMC_CTRL0);
-        uart_writeText(" CTRL1=");
-        uart_writeHex(*EMMC_CTRL1);
-        uart_writeText("\n");
-        sd_err = r;
-        return 0;
-    }
-
-    r = *EMMC_RESP0;
-
-    if (code == CMD_GO_IDLE || code == CMD_APP_CMD) {
-        return 0;
-    } else if (code == (CMD_APP_CMD | CMD_RSPNS_48)) {
-        if (r & CMD_ERRORS_MASK) {
-            sd_err = SD_ERROR;
-            return 0;
-        }
-        return r&SR_APP_CMD;
-    } else if (code == (CMD_SEND_OP_COND & ~CMD_NEED_APP)) {
-        return r;
-    } else if (code == CMD_SEND_IF_COND) {
-        sd_err = r == arg ? SD_OK : SD_ERROR;
-        return sd_err;
-    } else if (code == CMD_ALL_SEND_CID) {
-        r |= *EMMC_RESP3;
-        r |= *EMMC_RESP2;
-        r |= *EMMC_RESP1;
-        return r;
-    } else if (code == CMD_SEND_REL_ADDR) {
-        sd_err = (((r&0x1fff))|((r&0x2000)<<6)|((r&0x4000)<<8)|((r&0x8000)<<8))&CMD_ERRORS_MASK; // "DEAR GOD" - Idkthisguy's last words typing this out ;-;
-        return r&CMD_RCA_MASK;
-    }
-    
-    sd_err = (r & CMD_ERRORS_MASK) ? SD_ERROR : SD_OK;
-    return sd_err;
+    return SD_TIMEOUT;
 }
 
-int sd_readBlock(unsigned int lba, unsigned char *buffer, unsigned int num) {
-    int r,c=0,d;
-
-    if (num<1) num=1;
-
-    if(sd_status(SR_DAT_INHIBIT)) {
-        sd_err=SD_TIMEOUT; 
-        return 0;
-    }
-
-    unsigned int *buf=(unsigned int *)buffer;
-
-    if(sd_scr[0] & SCR_SUPP_CCS) {
-        if(num > 1 && (sd_scr[0] & SCR_SUPP_SET_BLKCNT)) {
-            sd_cmd(CMD_SET_BLOCKCNT,num);
-            if(sd_err) return 0;
+static int wait_interrupt(SdCard* card, uint32_t wanted, uint32_t timeout) {
+    uint64_t start = now(card);
+    uint32_t attempts;
+    for (attempts = 0; attempts < POLL_LIMIT; attempts++) {
+        uint32_t status = read_reg(card, INTERRUPT);
+        card->last_interrupt = status;
+        /* An error takes precedence even if the completion bit is also set. */
+        if (status & IRQ_ERRORS) return status & IRQ_TIMEOUTS ? SD_TIMEOUT : SD_ERROR;
+        if (status & wanted) {
+            write_reg(card, INTERRUPT, wanted); /* Write-one-to-clear, not RMW. */
+            return SD_OK;
         }
-
-        *EMMC_BLKSIZECNT = (num << 16) | 512;
-        sd_cmd(num == 1 ? CMD_READ_SINGLE : CMD_READ_MULTI,lba);
-        
-        if(sd_err) return 0;
-    } else {
-        *EMMC_BLKSIZECNT = (1 << 16) | 512;
+        if (now(card) - start >= timeout) break;
+        card->io.delay_us(card->io.context, timeout / POLL_LIMIT > 10 ? timeout / POLL_LIMIT : 10);
     }
-    while( c < num ) {
-        if(!(sd_scr[0] & SCR_SUPP_CCS)) {
-            sd_cmd(CMD_READ_SINGLE,(lba+c)*512);
-            if(sd_err) return 0;
-        }
-
-        if((r=sd_int(INT_READ_RDY))) {
-            uart_writeText("\rERROR: Timeout waiting for ready to read\n");
-            sd_err=r;
-            return 0;
-        }
-
-        for(d=0;d<128;d++) buf[d] = *EMMC_DATA;
-        c++; buf+=128;
-    }
-    if( num > 1 && !(sd_scr[0] & SCR_SUPP_SET_BLKCNT) && (sd_scr[0] & SCR_SUPP_CCS)) sd_cmd(CMD_STOP_TRANS,0);
-
-    return sd_err!=SD_OK || c!=num? 0 : num*512;
+    return SD_TIMEOUT;
 }
 
-int sd_clk(unsigned int f) {
-    unsigned int d,c=41666666/f,x,s=32,h=0;
-    int cnt = 100000;
-    while((*EMMC_STATUS & (SR_CMD_INHIBIT|SR_DAT_INHIBIT)) && cnt--) wait_msec(1);
-    if(cnt<=0) {
-        uart_writeText("[ERR] SD timeout waiting for inhibit flag\n");
-        return SD_ERROR;
-    }
+static int invalidate(SdCard* card, int result) {
+    card->ready = 0;
+    write_reg(card, SIGNAL_ENABLE, 0);
+    /* Abort through reset, not by gating a clock while CMD/DAT is inhibited.
+     * If a wedged host cannot reset, keep the primary error and never reuse it. */
+    write_reg(card, CLOCK, read_reg(card, CLOCK) | RESET_ALL);
+    (void)wait_bits(card, CLOCK, RESET_ALL, 0, COMMAND_TIMEOUT_US);
+    return result;
+}
 
-    *EMMC_CTRL1 &= ~C1_CLK_EN; wait_msec(10);
-
-    x=c-1; 
-    
-    if(!x) s=0; else {
-        if(!(x & 0xffff0000u)) {
-            x <<= 16; s -= 16; 
-        }
-        if(!(x & 0xff000000u)) {
-            x <<= 8;  s -= 8;
-        }
-        if(!(x & 0xf0000000u)) {
-            x <<= 4;  s -= 4;
-        }
-        if(!(x & 0xc0000000u)) {
-            x <<= 2;  s -= 2;
-        }
-        if(!(x & 0x80000000u)) {
-            x <<= 1;  s -= 1;
-        }
-
-        if(s>0) s--;
-        if(s>7) s=7;
-    }
-
-    if(sd_hv>HOST_SPEC_V2) d=c; else d=(1<<s);
-
-    if(d<=2) {
-        d=2;
-        s=0;
-    }
-    
-    if(sd_hv>HOST_SPEC_V2) h=(d&0x300)>>2;
-
-    d=(((d&0x0ff)<<8)|h);
-
-    *EMMC_CTRL1=(*EMMC_CTRL1&0xffff003f)|d; wait_msec(10);
-    *EMMC_CTRL1 |= C1_CLK_EN; wait_msec(10);
-    cnt=10000; while(!(*EMMC_CTRL1 & C1_CLK_STABLE) && cnt--) wait_msec(10);
-
-    if(cnt<=0) {
-        uart_writeText("[ERR] failed to get stable clock\n");
-        return SD_ERROR;
-    }
-
+static int set_clock(SdCard* card, uint32_t target) {
+    uint32_t divisor, value;
+    int result = wait_bits(card, STATE, COMMAND_BUSY | DATA_BUSY, 0, COMMAND_TIMEOUT_US);
+    if (result) return result;
+    /* SDHCI v3 divided-clock mode: register N produces base / (2*N).
+     * Round up, so the wire clock never exceeds the card's requested limit. */
+    divisor = (uint32_t)(((uint64_t)card->base_clock_hz + 2U * target - 1) / (2U * target));
+    if (!divisor || divisor > 1023) return SD_UNSUPPORTED;
+    write_reg(card, CLOCK, read_reg(card, CLOCK) & ~CLOCK_OUTPUT);
+    value = (14U << 16) | BIT(0) | ((divisor & 255U) << 8) | ((divisor >> 8) << 6);
+    write_reg(card, CLOCK, value);
+    result = wait_bits(card, CLOCK, BIT(1), BIT(1), CLOCK_TIMEOUT_US);
+    if (result) return result;
+    write_reg(card, CLOCK, value | CLOCK_OUTPUT);
+    card->clock_hz = card->base_clock_hz / (2U * divisor);
     return SD_OK;
 }
 
-int sd_init() {
-    long r,cnt,ccs=0;
-
-    r=*GPFSEL4; r&=~(7<<(7*3)); 
-    *GPFSEL4=r;
-    *GPPUD=2; wait_cycles(150); *GPPUDCLK1=(1<<15); wait_cycles(150); *GPPUD=0; *GPPUDCLK1=0;
-    r=*GPHEN1; r|=1<<15; *GPHEN1=r;
-
-    r=*GPFSEL4; r|=(7<<(8*3))|(7<<(9*3)); *GPFSEL4=r;
-    *GPPUD=2; wait_cycles(150); *GPPUDCLK1=(1<<16);
-    
-    r = *GPFSEL5; r|=(7<<(0*3)) | (7<<(1*3)) | (7<<(2*3)) | (7<<(3*3)); *GPFSEL5=r;
-    *GPPUD=2; wait_cycles(150);
-    *GPPUDCLK1=(1<<18) | (1<<19) | (1<<20) | (1<<21);
-    wait_cycles(150); *GPPUD=0; *GPPUDCLK1=0;
-
-    sd_hv = (*EMMC_SLOTISR_VER & HOST_SPEC_NUM) >> HOST_SPEC_NUM_SHIFT;
-    uart_writeText("[OK] EMMC GPIO set up\n");
-
-    *EMMC_CTRL1 |= C1_SRST_HC;
-
-    cnt=10000; do{
-        wait_msec(10);
-    } while( (*EMMC_CTRL1 & C1_SRST_HC) && cnt-- );
-
-    if(cnt<=0) {
-        uart_writeText("[ERR] EMMC failed to reset EMMC\n");
-        return SD_ERROR;
+static int command(SdCard* card, uint32_t index, uint32_t argument,
+                   uint32_t response_type, uint32_t check_status, uint32_t data) {
+    uint32_t flags = response_type << 16;
+    uint32_t inhibit = COMMAND_BUSY;
+    int result;
+    if (data || response_type == RESPONSE_BUSY) inhibit |= DATA_BUSY;
+    result = wait_bits(card, STATE, inhibit, 0, COMMAND_TIMEOUT_US);
+    if (result) return result;
+    if (response_type == RESPONSE_LONG) flags |= BIT(19); /* CRC, no index in R2. */
+    else if (response_type != RESPONSE_NONE && index != 41) flags |= BIT(19) | BIT(20);
+    if (data) flags |= BIT(21) | (data == 1 ? BIT(4) : 0); /* Single block, PIO. */
+    write_reg(card, INTERRUPT, 0xffffffffU);
+    write_reg(card, ARGUMENT, argument);
+    write_reg(card, COMMAND, (index << 24) | flags);
+    result = wait_interrupt(card, IRQ_COMMAND, COMMAND_TIMEOUT_US);
+    if (result) return result;
+    card->last_response = response_type == RESPONSE_NONE ? 0 : read_reg(card, RESPONSE);
+    if (check_status && (card->last_response & R1_ERRORS)) return SD_ERROR;
+    if (response_type == RESPONSE_BUSY) {
+        uint32_t timeout = index == 38 ? ERASE_TIMEOUT_US : DATA_TIMEOUT_US;
+        result = wait_interrupt(card, IRQ_TRANSFER, timeout);
+        if (!result) result = wait_bits(card, STATE, DATA_BUSY, 0, timeout);
     }
+    return result;
+}
 
-    *EMMC_CTRL0 |= 0x0F00;
-    wait_msec(10);
+/* SDHCI stores R2 card bits [127:8] in response-register bits [119:0]. */
+static uint32_t csd_field(const uint32_t response[4], uint32_t low, uint32_t width) {
+    uint32_t i, value = 0;
+    for (i = 0; i < width; i++) {
+        uint32_t position = low + i - 8;
+        value |= ((response[position / 32] >> (position % 32)) & 1U) << i;
+    }
+    return value;
+}
 
-    *EMMC_CTRL1 |= C1_CLK_INTLEN | C1_TOUNIT_MAX;
-    wait_msec(10);
+static int capacity(SdCard* card) {
+    uint32_t response[4], structure, block_length, i;
+    for (i = 0; i < 4; i++) response[i] = read_reg(card, RESPONSE + i * 4);
+    structure = csd_field(response, 126, 2);
+    block_length = csd_field(response, 80, 4);
+    card->command_classes = csd_field(response, 84, 12);
+    card->write_protected = csd_field(response, 12, 2) != 0;
+    uint32_t write_length = csd_field(response, 22, 4);
+    if (write_length >= 9 && write_length <= 11) {
+        card->erase_sectors = csd_field(response, 46, 1) ? 1U :
+            (csd_field(response, 39, 7) + 1U) << (write_length - 9);
+    }
+    if (card->block_addressed) {
+        if (structure != 1 || block_length != 9) return SD_UNSUPPORTED;
+        card->sectors = ((uint64_t)csd_field(response, 48, 22) + 1) * 1024;
+    } else {
+        uint32_t multiplier = csd_field(response, 47, 3);
+        if (structure != 0 || block_length < 9 || block_length > 11) return SD_UNSUPPORTED;
+        card->sectors = ((uint64_t)csd_field(response, 62, 12) + 1) << (multiplier + 2 + block_length - 9);
+        if (card->sectors > 0x400000ULL) return SD_UNSUPPORTED;
+    }
+    return SD_OK;
+}
 
-    if((r=sd_clk(400000))) return r;
+int sd_card_init(SdCard* card, const SdIo* io, uint32_t base_clock_hz) {
+    uint64_t start;
+    uint32_t attempts, ocr = 0;
+    int result;
+    if (!card || !io || !io->read32 || !io->write32 || !io->now_us || !io->delay_us ||
+        base_clock_hz < 400000 || base_clock_hz > 818400000) return SD_INVALID;
+    *card = (SdCard){0};
+    card->io = *io;
+    card->base_clock_hz = base_clock_hz;
+    /* This engine intentionally requires v3's 10-bit divider, with v4 mode off. */
+    if (((read_reg(card, VERSION) >> 16) & 255U) < 2) return SD_UNSUPPORTED;
+    write_reg(card, SIGNAL_ENABLE, 0);
+    write_reg(card, CLOCK, RESET_ALL);
+    result = wait_bits(card, CLOCK, RESET_ALL, 0, COMMAND_TIMEOUT_US);
+    if (result) return invalidate(card, result);
+    write_reg(card, HOST, read_reg(card, HOST) & ~(BIT(1) | BIT(2) | BIT(5)));
+    write_reg(card, STATUS_ENABLE, IRQ_COMMAND | IRQ_TRANSFER | IRQ_READ | IRQ_WRITE | IRQ_ERRORS);
+    result = set_clock(card, 400000);
+    if (result) return invalidate(card, result);
+    card->io.delay_us(card->io.context, 1000); /* More than 74 initial SD clocks. */
+    result = command(card, 0, 0, RESPONSE_NONE, 0, 0);
+    if (!result) result = command(card, 8, 0x1aa, RESPONSE_SHORT, 0, 0);
+    if (!result && card->last_response != 0x1aa) result = SD_UNSUPPORTED;
+    if (result) return invalidate(card, result);
+    start = now(card);
+    for (attempts = 0; attempts < 1000; attempts++) {
+        result = command(card, 55, 0, RESPONSE_SHORT, 1, 0);
+        if (result) return invalidate(card, result);
+        if (!(card->last_response & BIT(5))) return invalidate(card, SD_UNSUPPORTED);
+        /* Request 2.7-3.6V and high capacity, not the 1.8V signaling switch. */
+        result = command(card, 41, BIT(30) | 0x00ff8000U, RESPONSE_SHORT, 0, 0);
+        if (result) return invalidate(card, result);
+        ocr = card->last_response;
+        if (ocr & BIT(31)) break;
+        if (now(card) - start >= DATA_TIMEOUT_US) return invalidate(card, SD_TIMEOUT);
+        card->io.delay_us(card->io.context, 1000);
+    }
+    if (!(ocr & BIT(31))) return invalidate(card, SD_TIMEOUT);
+    if (!(ocr & 0x00ff8000U)) return invalidate(card, SD_UNSUPPORTED);
+    card->block_addressed = (ocr >> 30) & 1U;
+    result = command(card, 2, 0, RESPONSE_LONG, 0, 0);
+    if (!result) result = command(card, 3, 0, RESPONSE_SHORT, 0, 0);
+    if (result) return invalidate(card, result);
+    if (card->last_response & 0xe000U) return invalidate(card, SD_ERROR); /* R6 errors. */
+    card->rca = card->last_response & 0xffff0000U;
+    if (!card->rca) return invalidate(card, SD_ERROR);
+    result = command(card, 9, card->rca, RESPONSE_LONG, 0, 0);
+    if (!result) result = capacity(card);
+    if (!result) result = command(card, 7, card->rca, RESPONSE_BUSY, 1, 0);
+    if (!result && !card->block_addressed)
+        result = command(card, 16, SD_BLOCK_SIZE, RESPONSE_SHORT, 1, 0);
+    if (!result) result = set_clock(card, 25000000);
+    if (result) return invalidate(card, result);
+    card->ready = 1;
+    return SD_OK;
+}
 
-    wait_msec(50);
-
-    *EMMC_INT_EN   = 0xffffffff;
-    *EMMC_INT_MASK = 0xffffffff;
-    sd_scr[0]=sd_scr[1]=sd_rca=sd_err=0;
-    sd_cmd(CMD_GO_IDLE,0);
-
-    if(sd_err) return sd_err;
-
-    sd_cmd(CMD_SEND_IF_COND,0x000001AA);
-    if(sd_err) return sd_err;
-    cnt=100; r=0; while(!(r&ACMD41_CMD_COMPLETE) && cnt--) {
-        wait_cycles(400);
-        r=sd_cmd(CMD_SEND_OP_COND,ACMD41_ARG_HC);
-        uart_writeText("[OK] EMMC CMD_SEND_OP_COND returned ");
-        uart_writeHex(r);
-        uart_writeText("\n");
-
-        if(sd_err!=SD_TIMEOUT && sd_err!=SD_OK ) {
-            uart_writeText("[ERR] EMMC ACMD41 returned error\n");
-            return sd_err;
+int sd_card_sync(SdCard* card) {
+    if (!card) return SD_INVALID;
+    if (!card->ready) return SD_NOT_READY;
+    uint64_t start = now(card);
+    for (uint32_t attempts = 0; attempts < 5000; attempts++) {
+        int result = command(card, 13, card->rca, RESPONSE_SHORT, 1, 0);
+        if (result) return invalidate(card, result);
+        uint32_t state = (card->last_response >> 9) & 15U;
+        if ((card->last_response & BIT(8)) && state == 4) {
+            result = wait_bits(card, STATE, DATA_BUSY, 0, WRITE_TIMEOUT_US);
+            return result ? invalidate(card, result) : SD_OK;
         }
+        if (state != 4 && state != 7) return invalidate(card, SD_ERROR);
+        if (now(card) - start >= WRITE_TIMEOUT_US) break;
+        card->io.delay_us(card->io.context, 1000);
     }
-    if(!(r&ACMD41_CMD_COMPLETE) || !cnt ) return SD_TIMEOUT;
-    if(!(r&ACMD41_VOLTAGE)) return SD_ERROR;
-    if(r&ACMD41_CMD_CCS) ccs=SCR_SUPP_CCS;
+    return invalidate(card, SD_TIMEOUT);
+}
 
-    sd_cmd(CMD_ALL_SEND_CID,0);
-
-    sd_rca = sd_cmd(CMD_SEND_REL_ADDR,0);
-    if(sd_err) return sd_err;
-
-    if((r=sd_clk(25000000))) return r;
-
-    sd_cmd(CMD_CARD_SELECT,sd_rca);
-    if(sd_err) return sd_err;
-
-    if(sd_status(SR_DAT_INHIBIT)) return SD_TIMEOUT;
-    *EMMC_BLKSIZECNT = (1<<16) | 8;
-    sd_cmd(CMD_SEND_SCR,0);
-    if(sd_err) return sd_err;
-    if(sd_int(INT_READ_RDY)) return SD_TIMEOUT;
-
-    r=0; cnt=100000; while(r<2 && cnt) {
-        if( *EMMC_STATUS & SR_READ_AVAILABLE )
-            sd_scr[r++] = *EMMC_DATA;
-        else
-            wait_msec(1);
+int sd_card_write(SdCard* card, uint64_t lba, uint32_t count,
+                  const void* buffer, size_t buffer_bytes) {
+    if (!card) return SD_INVALID;
+    if (!card->ready) return SD_NOT_READY;
+    if (!buffer || !count || count > SD_READ_MAX_BLOCKS) return SD_INVALID;
+    size_t needed = (size_t)count * SD_BLOCK_SIZE;
+    if (buffer_bytes < needed || (uintptr_t)buffer > ~(uintptr_t)0 - needed ||
+        lba >= card->sectors || count > card->sectors - lba) return SD_INVALID;
+    if (card->write_protected) return SD_WRITE_PROTECTED;
+    if (!(card->command_classes & BIT(4))) return SD_UNSUPPORTED;
+    const uint8_t* bytes = buffer;
+    for (uint32_t block = 0; block < count; block++) {
+        uint64_t address = card->block_addressed ? lba + block : (lba + block) * SD_BLOCK_SIZE;
+        if (address > 0xffffffffULL) return invalidate(card, SD_ERROR);
+        write_reg(card, BLOCK, (1U << 16) | SD_BLOCK_SIZE);
+        int result = command(card, 24, (uint32_t)address, RESPONSE_SHORT, 1, 2);
+        if (!result) result = wait_interrupt(card, IRQ_WRITE, DATA_TIMEOUT_US);
+        if (result) return invalidate(card, result);
+        for (uint32_t word = 0; word < SD_BLOCK_SIZE / 4; word++, bytes += 4) {
+            uint32_t value = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+                             ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+            write_reg(card, DATA, value);
+        }
+        result = wait_interrupt(card, IRQ_TRANSFER, WRITE_TIMEOUT_US);
+        if (!result) result = wait_bits(card, STATE, DATA_BUSY, 0, WRITE_TIMEOUT_US);
+        if (!result) result = sd_card_sync(card);
+        if (result) return card->ready ? invalidate(card, result) : result;
     }
-    if(r!=2) return SD_TIMEOUT;
-    if(sd_scr[0] & SCR_SD_BUS_WIDTH_4) {
-        sd_cmd(CMD_SET_BUS_WIDTH,sd_rca|2);
-        if(sd_err) return sd_err;
-        
-        *EMMC_CTRL0 |= C0_HCTL_DWITDH;
+    return SD_OK;
+}
+
+int sd_card_erase(SdCard* card, uint64_t lba, uint32_t count) {
+    if (!card) return SD_INVALID;
+    if (!card->ready) return SD_NOT_READY;
+    if (!count || count > SD_ERASE_MAX_BLOCKS || lba >= card->sectors ||
+        count > card->sectors - lba) return SD_INVALID;
+    if (card->write_protected) return SD_WRITE_PROTECTED;
+    if (!(card->command_classes & BIT(5)) || !card->erase_sectors) return SD_UNSUPPORTED;
+    if (lba % card->erase_sectors || count % card->erase_sectors) return SD_INVALID;
+    uint64_t first = card->block_addressed ? lba : lba * SD_BLOCK_SIZE;
+    uint64_t last = card->block_addressed ? lba + count - 1 : (lba + count - 1) * SD_BLOCK_SIZE;
+    if (last > 0xffffffffULL) return SD_INVALID;
+    int result = command(card, 32, (uint32_t)first, RESPONSE_SHORT, 1, 0);
+    if (!result) result = command(card, 33, (uint32_t)last, RESPONSE_SHORT, 1, 0);
+    if (!result) result = command(card, 38, 0, RESPONSE_BUSY, 1, 0);
+    if (!result) result = sd_card_sync(card);
+    return result && card->ready ? invalidate(card, result) : result;
+}
+
+int sd_card_read(SdCard* card, uint64_t lba, uint32_t count,
+                 void* buffer, size_t buffer_bytes) {
+    uint8_t* bytes = buffer;
+    uint32_t block, word;
+    size_t needed;
+    if (!card) return SD_INVALID;
+    if (!card->ready) return SD_NOT_READY;
+    if (!buffer || !count || count > SD_READ_MAX_BLOCKS) return SD_INVALID;
+    needed = (size_t)count * SD_BLOCK_SIZE;
+    if (buffer_bytes < needed || (uintptr_t)buffer > ~(uintptr_t)0 - needed ||
+        lba >= card->sectors || count > card->sectors - lba) return SD_INVALID;
+    for (block = 0; block < count; block++) {
+        uint64_t address = card->block_addressed ? lba + block : (lba + block) * SD_BLOCK_SIZE;
+        int result;
+        if (address > 0xffffffffULL) return invalidate(card, SD_ERROR);
+        write_reg(card, BLOCK, (1U << 16) | SD_BLOCK_SIZE);
+        result = command(card, 17, (uint32_t)address, RESPONSE_SHORT, 1, 1);
+        if (!result) result = wait_interrupt(card, IRQ_READ, DATA_TIMEOUT_US);
+        if (result) return invalidate(card, result);
+        for (word = 0; word < SD_BLOCK_SIZE / 4; word++) {
+            uint32_t value = read_reg(card, DATA);
+            /* The controller's FIFO is word-sized; destinations need not be. */
+            *bytes++ = (uint8_t)value;
+            *bytes++ = (uint8_t)(value >> 8);
+            *bytes++ = (uint8_t)(value >> 16);
+            *bytes++ = (uint8_t)(value >> 24);
+        }
+        result = wait_interrupt(card, IRQ_TRANSFER, DATA_TIMEOUT_US);
+        if (!result) result = wait_bits(card, STATE, DATA_BUSY, 0, DATA_TIMEOUT_US);
+        if (result) return invalidate(card, result);
     }
-    uart_writeText("[EMMC] EMMC supports ");
-    if(sd_scr[0] & SCR_SUPP_SET_BLKCNT)
-        uart_writeText("SET_BLKCNT ");
-    if(ccs)
-        uart_writeText("CCS ");
-    uart_writeText("\n");
-
-    sd_scr[0]&=~SCR_SUPP_CCS;
-    sd_scr[0]|=ccs;
-
-    uart_writeText("[OK] SD INITIALIZED!\n");
     return SD_OK;
 }

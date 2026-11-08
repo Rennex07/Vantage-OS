@@ -1,4 +1,5 @@
 #include "../../includes/mmu.h"
+#include "../../includes/memory.h"
 
 #define MAIR_VALUE 0x44FF00ULL
 #define TCR_VALUE (32ULL | (1ULL << 8) | (1ULL << 10) | (3ULL << 12) | (1ULL << 23) | (2ULL << 32))
@@ -26,11 +27,11 @@ void mmu_init(uintptr_t fbStart, uint32_t fbSize) {
     uint64_t el;
     __asm__ volatile("mrs %0, CurrentEL" : "=r"(el));
     if (((el >> 2) & 3) != 1) {
-        return;
+        mm_halt("[ERR] MMU initialization requires EL1\n");
     }
     uint64_t control;
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(control));
-    if (control & 5) return; /* Never rebuild tables live on any core. */
+    if (control & 5) mm_halt("[ERR] Live MMU tables cannot be rebuilt\n");
 
     mmu_populate_tables(l1, l2, fbStart, fbSize,
                         (uintptr_t)__user_start, (uintptr_t)__user_end,

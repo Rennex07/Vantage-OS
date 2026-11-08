@@ -1,0 +1,78 @@
+name: Memory management
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  memory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install AArch64 tools and test harness
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          python -m pip install unicorn==2.1.4 capstone==5.0.7
+      - name: Build and test native allocation/discovery with sanitizers
+        run: |
+          cmake -S mm -B "$RUNNER_TEMP/mm-host" -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake --build "$RUNNER_TEMP/mm-host" --parallel
+          ctest --test-dir "$RUNNER_TEMP/mm-host" --output-on-failure
+      - name: Build and test persistent storage with sanitizers
+        run: |
+          cmake -S kernel/fs -B "$RUNNER_TEMP/files-host" -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake --build "$RUNNER_TEMP/files-host" --parallel
+          ctest --test-dir "$RUNNER_TEMP/files-host" --output-on-failure
+      - name: Test four-core scheduler on host threads with UBSan
+        run: |
+          cmake -S kernel/sched -B "$RUNNER_TEMP/scheduler-host" -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-omit-frame-pointer"
+          cmake --build "$RUNNER_TEMP/scheduler-host" --parallel
+          ctest --test-dir "$RUNNER_TEMP/scheduler-host" --output-on-failure
+      - name: Build kernel and test linked ARM paths
+        run: |
+          make BUILD_DIR="$RUNNER_TEMP/mm-arm" -j2
+          python tests/arm/memory_management.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+          python tests/arm/secondary_startup.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+          python tests/arm/terminal.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+          python tests/arm/tasks.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+          python tests/arm/task_smp.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+          python tests/arm/files.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+          python tests/arm/pi4_drivers.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+          python tests/arm/storage.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+      - name: Test driver protocol models with sanitizers
+        run: |
+          cmake -S drivers -B "$RUNNER_TEMP/drivers-host" -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake --build "$RUNNER_TEMP/drivers-host" --parallel
+          ctest --test-dir "$RUNNER_TEMP/drivers-host" --output-on-failure
+          python -m unittest discover -s tests/tools -v
+      - name: Build opt-in GPU path
+        run: make BUILD_DIR="$RUNNER_TEMP/v3d-arm" V3D=1 -j2
+      - name: Verify storage boot gate and rebuild after changing options
+        run: |
+          cp "$RUNNER_TEMP/mm-arm/kernel8.elf" "$RUNNER_TEMP/default-kernel8.elf"
+          make BUILD_DIR="$RUNNER_TEMP/mm-arm" STORAGE_VALIDATION=1 SD_BASE_CLOCK_HZ=100000000 STORAGE_PARTITION=1 -j2
+          python tests/arm/storage_boot.py "$RUNNER_TEMP/default-kernel8.elf" "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+
+  desktop:
+    name: Desktop terminal and simulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev
+      - name: Build and test simulator
+        run: |
+          cmake -S sim -B "$RUNNER_TEMP/sim" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/sim" --parallel
+          ctest --test-dir "$RUNNER_TEMP/sim" --output-on-failure

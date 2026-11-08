@@ -51,19 +51,19 @@ unsigned int gpio_call(unsigned int pin_number, unsigned int value, unsigned int
 }
 
 unsigned int gpio_set(unsigned int pin_number, unsigned int value) {
-    return gpio_call(pin_number, value, IO_GPSET0, 1, GPIO_MAX_PIN);
+    return gpio_call(pin_number, value, (unsigned int)IO_GPSET0, 1, GPIO_MAX_PIN);
 }
 
 unsigned int gpio_clear(unsigned int pin_number, unsigned int value) {
-    return gpio_call(pin_number, value, IO_GPCLR0, 1, GPIO_MAX_PIN); 
+    return gpio_call(pin_number, value, (unsigned int)IO_GPCLR0, 1, GPIO_MAX_PIN);
 
 }
 unsigned int gpio_pull(unsigned int pin_number, unsigned int value) {
-    return gpio_call(pin_number, value, GPPUPPDN0, 2, GPIO_MAX_PIN); 
+    return gpio_call(pin_number, value, (unsigned int)GPPUPPDN0, 2, GPIO_MAX_PIN);
 }
 
 unsigned int gpio_function(unsigned int pin_number, unsigned int value) {
-    return gpio_call(pin_number, value, IO_GPFSEL0, 3, GPIO_MAX_PIN); 
+    return gpio_call(pin_number, value, (unsigned int)IO_GPFSEL0, 3, GPIO_MAX_PIN);
 }
 
 void gpio_useAsAlt5(unsigned int pin_number) {
@@ -120,11 +120,23 @@ void uart_writeText(const char *buffer) {
     }
 }
 
-void uart_writeHex(unsigned int d) {
-    uart_writeText("0x");
-
-    for (int shift = 28; shift >= 0; shift -= 4) {
-        unsigned int n = (d >> shift) & 0xF;
-        uart_writeByteBlockingActual(n < 10 ? '0' + n : 'A' + (n - 10));
+void uart_write_bytes(const char* buffer, size_t length) {
+    size_t i;
+    for (i = 0; i < length; i++) {
+        if (buffer[i] == '\n') uart_writeByteBlockingActual('\r');
+        uart_writeByteBlockingActual((unsigned char)buffer[i]);
     }
+}
+
+uint32_t uart_read_byte(uint8_t* byte) {
+    uint32_t status;
+    if (!byte) return 0;
+    status = mmio_read(AUX_MU_LSR_REG);
+    if (status & 2) {
+        if (status & 1) (void)mmio_read(AUX_MU_IO_REG);
+        return 2;
+    }
+    if (!(status & 1)) return 0;
+    *byte = (uint8_t)mmio_read(AUX_MU_IO_REG);
+    return 1;
 }

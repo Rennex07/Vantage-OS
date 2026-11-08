@@ -31,11 +31,8 @@ inline void* std_memcpy(void* dest, const void* src, size_t n) {
     return dest;
 }
 
-inline void* memset(void* s, int c, size_t n) {
-    unsigned char* p = (unsigned char*)s;
-    for (size_t i = 0; i < n; i++) {
-        p[i] = (unsigned char)c;
-    }
-    return s;
-}
+/* The freestanding ABI may emit these calls for large structure copies/zeros. */
+void* memcpy(void* dest, const void* src, size_t n);
+void* memset(void* dest, int value, size_t n);
+int memcmp(const void* a, const void* b, size_t n);
 #endif

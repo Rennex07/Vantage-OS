@@ -7,6 +7,8 @@
 #include "../../includes/video/display.h"
 #include "../../includes/mmu.h"
 #include "../../includes/video/raster.h"
+#include "../../includes/memory.h"
+#include "../../includes/video/v3d.h"
 
 #include "../../includes/io.h"
 
@@ -26,7 +28,28 @@ static uint32_t lastSwap;
 #define BACK_PIXELS (800 * 480)
 #define FRAME_US 16667
 
-static uint32_t backBuffer[BACK_PIXELS] __attribute__((aligned(64)));
+static uint32_t* backBuffer;
+static uint32_t* cpuBackBuffer;
+static V3d* acceleration;
+
+static void check_acceleration(void) {
+    if (acceleration && acceleration->state != 1) {
+        backBuffer = drawBase = cpuBackBuffer;
+        acceleration = NULL;
+        uart_writeText("[ERR] V3D stopped; CPU rendering resumed\n");
+    }
+}
+
+uint32_t fb_enable_v3d(V3d* gpu) {
+    if (!backBuffer || acceleration || !gpu || gpu->width != fbWidth || gpu->height != pageHeight) return 0;
+    uint32_t* pixels = v3d_pixels(gpu, 0);
+    if (!pixels) return 0;
+    memcpy(pixels, backBuffer, (size_t)backPitch * pageHeight);
+    cpuBackBuffer = backBuffer;
+    backBuffer = drawBase = pixels;
+    acceleration = gpu;
+    return 1;
+}
 
 static void cache_flush(volatile void* addr, uint32_t size) {
     uintptr_t start = (uintptr_t)addr & ~63ULL;
@@ -64,8 +87,8 @@ uint32_t mbox_call(uint8_t ch) {
 }
 
 uint32_t* fb_init(uint32_t width, uint32_t height) {
-    if (width * height > BACK_PIXELS || (width & 1)) {
-        return 0;
+    if (!width || !height || (uint64_t)width * height > BACK_PIXELS || (width & 1) || backBuffer) {
+        mm_halt("[ERR] Invalid or repeated framebuffer initialization\n");
     }
 
     mbox[0] = 35 * 4;
@@ -113,8 +136,11 @@ uint32_t* fb_init(uint32_t width, uint32_t height) {
     mbox[34] = 0;
 
     if (!mbox_call(MBOX_CH_PROP) || mbox[20] != 32 || mbox[28] == 0) {
-        return 0;
+        mm_halt("[ERR] Firmware framebuffer request failed\n");
     }
+    if (mbox[33] < width * 4 || (mbox[33] & 3) ||
+        (uint64_t)height * PAGE_COUNT * mbox[33] > mbox[29])
+        mm_halt("[ERR] Invalid firmware framebuffer allocation\n");
 
     fbBase = (uint32_t*)(uintptr_t)(mbox[28] & 0x3FFFFFFF);
     fbPitch = mbox[33];
@@ -122,16 +148,25 @@ uint32_t* fb_init(uint32_t width, uint32_t height) {
     backPitch = width * 4;
     pageHeight = height;
     drawPage = 1;
-    drawBase = backBuffer;
     lastSwap = time_us();
 
-    mmu_init((uintptr_t)fbBase, pageHeight * PAGE_COUNT * fbPitch);
+    if (!mm_finalize_framebuffer((uintptr_t)fbBase, mbox[29]))
+        mm_halt("[ERR] Firmware memory reservations conflict; boot halted\n");
+    mmu_init((uintptr_t)fbBase, mbox[29]);
+    if (!mm_init_allocator() || !mm_self_test())
+        mm_halt("[ERR] Memory allocator initialization/self-test failed\n");
+    uart_writeText("[OK] Page allocator and heap self-test passed\n");
+    /* Keep the old capacity used by the panel's fixed coordinate transform. */
+    backBuffer = mm_zalloc((uint64_t)BACK_PIXELS * sizeof(uint32_t), 64);
+    if (!backBuffer) mm_halt("[ERR] Back-buffer allocation failed\n");
+    drawBase = backBuffer;
 
     uart_writeText("[OK] Vantage display driver...\n");
     return fbBase;
 }
 
 void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
+    check_acceleration();
     uint32_t phys_x = y;
     uint32_t phys_y = 480 - 1 - x;
 
@@ -140,10 +175,18 @@ void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 }
 
 void fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+    check_acceleration();
     uint32_t px = y;
     uint32_t py = 480 - x - w;
     uint32_t pw = h;
     uint32_t ph = w;
+
+    if (acceleration && !px && !py && pw == fbWidth && ph == pageHeight) {
+        if (v3d_clear(acceleration, 0, color) == HW_OK) return;
+        /* Failed GPU pages remain quarantined. Repaint a separate CPU buffer
+         * without reading the potentially still device-owned surface. */
+        check_acceleration();
+    }
 
     RasterFill fill = { drawBase, backPitch / 4, px, py, pw, ph, color };
     /* Keep tiny spans local; full-canvas clears use all four cores. */
@@ -159,6 +202,7 @@ void fb_wait_frame(void) {
 }
 
 void fb_swap(void) {
+    check_acceleration();
     uintptr_t page = (uintptr_t)fbBase + drawPage * pageHeight * fbPitch;
 
     RasterCopy copy = { backBuffer, (volatile uint32_t*)page,

@@ -1,20 +1,12 @@
-# Vantage OS Desktop Simulator Guide
+# Desktop terminal simulator
 
-This took me a while to actually get this up and running because it would run only on Rennex's pc
+Follow the [build instructions](../README.md#desktop-simulator) in the main README.
+The executable is `sim/build/Release/vantage_sim.exe`.
 
-SDL2 is added manually in sim so nobody has to suffer and install like I (Idkthisguy) did :/
-
-### Configure command
-
-```powershell
-cd sim
-cmake -B build -DCMAKE_PREFIX_PATH="./SDL2"
-```
-
-### Build comand
+Run tests from the repository root:
 
 ```powershell
-cmake --build build --config Release
+ctest --test-dir sim/build -C Release --output-on-failure
 ```
 
-The .exe file is in sim/build/, but I couldn't find the right one..
+See the [terminal guide](../docs/TERMINAL.md) for usage.

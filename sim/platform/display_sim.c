@@ -6,6 +6,8 @@
 
 #include "../../includes/platform.h"
 #include "../../includes/io.h"
+#include "../../includes/console.h"
+#include "display_sim.h"
 
 #include "SDL2/SDL.h"
 
@@ -44,6 +46,16 @@ static uint32_t lastFrame;
 static int mouseDown;
 static int mouseX;
 static int mouseY;
+static uint32_t coordinateOverlay = 1;
+
+#define INPUT_QUEUE_SIZE 128U
+static KeyEvent keys[INPUT_QUEUE_SIZE];
+static TouchEvent touches[INPUT_QUEUE_SIZE];
+static uint32_t keyHead, keyCount, touchHead, touchCount, discardKeyLine;
+
+void sim_set_coordinate_overlay(uint32_t enabled) { coordinateOverlay = enabled != 0; }
+
+uint64_t sim_backbuffer_bytes(void) { return (uint64_t)canvasW * canvasH * sizeof(uint32_t); }
 
 static const uint8_t* coordinate_glyph(char c) {
     static const uint8_t digits[10][5] = {
@@ -139,6 +151,8 @@ uint32_t* fb_init(uint32_t width, uint32_t height) {
     }
 
     backBuffer = (uint32_t*)calloc((size_t)canvasW * canvasH, sizeof(uint32_t));
+    keyHead = keyCount = touchHead = touchCount = discardKeyLine = 0;
+    SDL_StartTextInput();
     lastFrame = time_us();
     return backBuffer;
 }
@@ -178,14 +192,37 @@ static int clamp_coordinate(int value, uint32_t size) {
     return value;
 }
 
-static uint32_t poll_touch_event(TouchEvent* result) {
-    SDL_Event e;
+static void queue_key(KeyEvent key) {
+    if (keyCount == INPUT_QUEUE_SIZE) {
+        keyHead = keyCount = 0;
+        discardKeyLine = 1;
+    }
+    if (discardKeyLine) {
+        if (key.type != KEY_ENTER && key.type != KEY_CANCEL) return;
+        discardKeyLine = 0;
+        key.type = KEY_CANCEL; /* Never execute a truncated input line. */
+        key.character = 0;
+    }
+    keys[(keyHead + keyCount++) % INPUT_QUEUE_SIZE] = key;
+}
 
-    result->type = TOUCH_EVENT_NONE;
-    result->x = mouseX;
-    result->y = mouseY;
+static void queue_touch(TouchEvent touch) {
+    if (touchCount == INPUT_QUEUE_SIZE) {
+        touchHead = touchCount = 0;
+        mouseDown = 0;
+        touch.type = TOUCH_EVENT_UP; /* Reset a consumer after queue overflow. */
+    }
+    touches[(touchHead + touchCount++) % INPUT_QUEUE_SIZE] = touch;
+}
+
+static void pump_input(void) {
+    SDL_Event e;
+    uint32_t count;
+
     SDL_PumpEvents();
-    while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) > 0) {
+    for (count = 0; count < 256 && SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) > 0; count++) {
+        TouchEvent touch = {TOUCH_EVENT_NONE, 0, 0};
+        KeyEvent key = {KEY_NONE, 0};
         switch (e.type) {
             case SDL_QUIT:
                 SDL_Quit();
@@ -196,7 +233,7 @@ static uint32_t poll_touch_event(TouchEvent* result) {
                     mouseDown = 1;
                     mouseX = clamp_coordinate(e.button.x, canvasW);
                     mouseY = clamp_coordinate(e.button.y, canvasH);
-                    result->type = TOUCH_EVENT_DOWN;
+                    touch.type = TOUCH_EVENT_DOWN;
                 }
                 break;
             case SDL_MOUSEBUTTONUP:
@@ -204,7 +241,7 @@ static uint32_t poll_touch_event(TouchEvent* result) {
                     mouseDown = 0;
                     mouseX = clamp_coordinate(e.button.x, canvasW);
                     mouseY = clamp_coordinate(e.button.y, canvasH);
-                    result->type = TOUCH_EVENT_UP;
+                    touch.type = TOUCH_EVENT_UP;
                 }
                 break;
             case SDL_MOUSEMOTION:
@@ -214,7 +251,7 @@ static uint32_t poll_touch_event(TouchEvent* result) {
                     if (mouseX != x || mouseY != y) {
                         mouseX = x;
                         mouseY = y;
-                        result->type = TOUCH_EVENT_MOVE;
+                        touch.type = TOUCH_EVENT_MOVE;
                     }
                 }
                 break;
@@ -224,17 +261,59 @@ static uint32_t poll_touch_event(TouchEvent* result) {
                     exit(0);
                 } else if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST && mouseDown) {
                     mouseDown = 0;
-                    result->type = TOUCH_EVENT_UP;
+                    touch.type = TOUCH_EVENT_UP;
                 }
+                break;
+            case SDL_TEXTINPUT: {
+                size_t i;
+                for (i = 0; i < sizeof(e.text.text) && e.text.text[i]; i++) {
+                    unsigned char c = (unsigned char)e.text.text[i];
+                    if (c >= 32 && c <= 126) {
+                        key.type = KEY_TEXT;
+                        key.character = c;
+                        queue_key(key);
+                    }
+                }
+                break;
+            }
+            case SDL_KEYDOWN:
+                if (e.key.keysym.sym == SDLK_RETURN || e.key.keysym.sym == SDLK_KP_ENTER) key.type = KEY_ENTER;
+                else if (e.key.keysym.sym == SDLK_BACKSPACE) key.type = KEY_BACKSPACE;
+                else if ((e.key.keysym.mod & KMOD_CTRL) && e.key.keysym.sym == SDLK_l) key.type = KEY_CLEAR;
+                else if ((e.key.keysym.mod & KMOD_CTRL) && e.key.keysym.sym == SDLK_c) key.type = KEY_CANCEL;
+                if (key.type != KEY_NONE) queue_key(key);
                 break;
             default:
                 break;
         }
-        if (result->type != TOUCH_EVENT_NONE) {
-            result->x = mouseX;
-            result->y = mouseY;
-            return 1;
+        if (touch.type != TOUCH_EVENT_NONE) {
+            touch.x = mouseX;
+            touch.y = mouseY;
+            queue_touch(touch);
         }
+    }
+}
+
+uint32_t key_read(KeyEvent* event) {
+    if (!event) return 0;
+    pump_input();
+    event->type = KEY_NONE;
+    event->character = 0;
+    if (!keyCount) return 0;
+    *event = keys[keyHead++ % INPUT_QUEUE_SIZE];
+    keyCount--;
+    return 1;
+}
+
+static uint32_t poll_touch_event(TouchEvent* result) {
+    pump_input();
+    result->type = TOUCH_EVENT_NONE;
+    result->x = mouseX;
+    result->y = mouseY;
+    if (touchCount) {
+        *result = touches[touchHead++ % INPUT_QUEUE_SIZE];
+        touchCount--;
+        return 1;
     }
     return 0;
 }
@@ -256,7 +335,7 @@ void fb_swap(void) {
                       (int)(canvasW * sizeof(uint32_t)));
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, texture, NULL, NULL);
-    draw_coordinates();
+    if (coordinateOverlay) draw_coordinates();
     SDL_RenderPresent(renderer);
 }
 
@@ -276,6 +355,7 @@ uint32_t touch_init(void) {
     mouseDown = 0;
     mouseX = 0;
     mouseY = 0;
+    touchHead = touchCount = 0;
     return 1;
 }
 

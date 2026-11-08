@@ -16,3 +16,10 @@ void parallel_port_halt(const char* message);
 void parallel_worker_online(unsigned int core);
 uint32_t parallel_worker_poll(unsigned int core);
 void parallel_worker_entry(unsigned int core);
+
+/* Immutable hooks installed by core 0 before scheduling starts. reserve(1)
+ * claims idle workers atomically against task dispatch; reserve(0) releases. */
+int parallel_task_install(uint32_t (*poll)(unsigned int core), int (*reserve)(int claim));
+uint32_t parallel_task_mask(void);
+int parallel_task_start(void);
+void parallel_task_stop(void);

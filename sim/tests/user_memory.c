@@ -5,8 +5,13 @@
 
 static uint64_t level1[4];
 static uint64_t level2[4][512];
-static uint32_t user_words[64];
-static unsigned int reads, circles;
+static uint64_t user_words[64];
+static unsigned int reads, circles, keys, text_rows, buttons;
+
+uint32_t mm_block_mapped(uint64_t address) {
+    /* Independent synthetic hole and no-map block, away from test user data. */
+    return address != 0x10000000 && address != 0x10200000;
+}
 
 uint64_t handle_sys_call(uint64_t id, uint64_t arg);
 
@@ -16,6 +21,7 @@ uint32_t user_buffer_valid(uintptr_t buffer, size_t size) {
 }
 
 void fb_wait_frame(void) {}
+uint32_t time_us(void) { return 123456; }
 uint32_t touch_read(TouchEvent* event) {
     reads++;
     event->type = TOUCH_EVENT_DOWN;
@@ -26,6 +32,25 @@ uint32_t touch_read(TouchEvent* event) {
 void canvas_set_color(uint32_t color) { (void)color; }
 void canvas_clear(void) {}
 void canvas_present(void) {}
+uint32_t canvas_text_columns(void) { return 60; }
+uint32_t canvas_text_rows(void) { return 50; }
+uint64_t sim_backbuffer_bytes(void) { return 800 * 480 * 4; }
+uint32_t canvas_text_row(const TextRow* row) {
+    if ((uintptr_t)row >= (uintptr_t)user_words && (uintptr_t)row < (uintptr_t)(user_words + 64)) return 0;
+    text_rows++;
+    return row->length <= TEXT_MAX_COLUMNS;
+}
+uint32_t key_read(KeyEvent* event) {
+    keys++;
+    event->type = KEY_TEXT;
+    event->character = 'a';
+    return 1;
+}
+uint32_t canvas_button(const CanvasButton* button) {
+    if ((uintptr_t)button >= (uintptr_t)user_words && (uintptr_t)button < (uintptr_t)(user_words + 64)) return 0;
+    buttons++;
+    return 1;
+}
 void canvas_fill_circle(int x, int y, int r) {
     if (x == 12 && y == 34 && r == 5) circles++;
 }
@@ -46,6 +71,11 @@ int main(void) {
     for (g = 0; g < 4; g++) {
         if (level1[g] != ((uint64_t)(uintptr_t)level2[g] | 3)) return 1;
         for (i = 0; i < 512; i++) {
+            uint64_t address = ((uint64_t)g << 30) | ((uint64_t)i << 21);
+            if (!mm_block_mapped(address)) {
+                if (level2[g][i]) return 1;
+                continue;
+            }
             unsigned int ap = (unsigned int)((level2[g][i] >> 6) & 3);
             unsigned int expected = g == 0 && i == 0 ? 3 : g == 0 && i == 2 ? 1 : 0;
             if (ap != expected) return 1;
@@ -81,6 +111,27 @@ int main(void) {
     if (circles) return 1;
     handle_sys_call(4, (uint64_t)start);
     if (circles != 1) return 1;
+    {
+        const uint64_t invalid[] = {0, (uint64_t)(uintptr_t)&kernel_event, end - 4, start + 1};
+        const uint64_t calls[] = {6, 7, 8, 10, 11};
+        size_t call, pointer;
+        for (call = 0; call < sizeof(calls) / sizeof(calls[0]); call++)
+            for (pointer = 0; pointer < sizeof(invalid) / sizeof(invalid[0]); pointer++)
+                if (handle_sys_call(calls[call], invalid[pointer])) return 1;
+        if (keys || text_rows || buttons || kernel_event.type != TOUCH_EVENT_NONE) return 1;
+        if (!handle_sys_call(11, start) || buttons != 1) return 1;
+        if (!handle_sys_call(6, start) || keys != 1 || ((KeyEvent*)user_words)->character != 'a') return 1;
+        ((TextRow*)user_words)->length = 60;
+        if (!handle_sys_call(7, start) || text_rows != 1) return 1;
+        if (!handle_sys_call(8, start) || ((ConsoleInfo*)user_words)->columns != 60 ||
+            ((ConsoleInfo*)user_words)->memory_kind != CONSOLE_MEMORY_HOST ||
+            ((ConsoleInfo*)user_words)->host_backbuffer_bytes != 1536000) return 1;
+        ((ConsoleWrite*)user_words)->length = CONSOLE_WRITE_MAX + 1;
+        if (handle_sys_call(10, start)) return 1;
+        ((ConsoleWrite*)user_words)->length = 3;
+        if (handle_sys_call(10, start) != 3) return 1;
+        if (handle_sys_call(12, 0) != 123456) return 1;
+    }
     puts("PASS: kernel mappings, user stack region, buffer boundaries and syscall pointer checks");
     return 0;
 }
