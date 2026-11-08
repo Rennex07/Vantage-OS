@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import pathlib
 import tempfile
 import urllib.request
@@ -174,21 +175,23 @@ def main():
     parser.add_argument("--ttf", type=pathlib.Path, default=None,
                         help="local JetBrains Mono TTF; downloads otherwise")
     arguments = parser.parse_args()
-    source = arguments.ttf
-    if source is None:
-        source = pathlib.Path(tempfile.gettempdir()) / "vantage-font" / \
-            "JetBrainsMono-Regular.ttf"
-        if not source.exists():
-            source.parent.mkdir(parents=True, exist_ok=True)
-            source.write_bytes(urllib.request.urlopen(FONT_URL, timeout=60).read())
+    with ExitStack() as stack:
+        source = arguments.ttf
+        if source is None:
+            # A private directory prevents other users from substituting symlinks.
+            directory = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="vantage-font-"))
+            source = pathlib.Path(directory) / "JetBrainsMono-Regular.ttf"
+            with urllib.request.urlopen(FONT_URL, timeout=60) as response:
+                source.write_bytes(response.read())
             print(f"downloaded {FONT_URL}")
-    if not source.exists():
-        raise SystemExit(f"font file not found: {source}")
-    match = choose_font(source)
-    cells = cell_rows(match["placements"], match["baseline"])
-    if any(min(cells[chr(code)]) != 0 for code in (32,)):
-        raise SystemExit("space must not render ink")
-    write_header(match, cells)
+        if not source.exists():
+            raise SystemExit(f"font file not found: {source}")
+        match = choose_font(source)
+        cells = cell_rows(match["placements"], match["baseline"])
+        if any(min(cells[chr(code)]) != 0 for code in (32,)):
+            raise SystemExit("space must not render ink")
+        write_header(match, cells)
 
 
 if __name__ == "__main__":
