@@ -33,3 +33,5 @@ Four-core cooperative task scheduling, affinity and hardware acceptance are
 documented in [the scheduler guide](docs/SCHEDULER.md).
 
 For implementation details and tests, see the [developer guide](docs/DEVELOPMENT.md).
+
+

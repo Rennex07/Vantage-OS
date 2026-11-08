@@ -34,8 +34,12 @@ C_SOURCES = $(wildcard init/*.c) \
             $(wildcard drivers/*/*.c) \
 			$(wildcard drivers/*.c) \
             $(wildcard user/lib/*.c) \
-            $(wildcard user/env/*.c)
+            $(wildcard user/env/*.c) \
+			$(wildcard kernel/sched/*.c) \
+			$(wildcard kernel/sched/delays/*.c) \
+			$(wildcard kernel/fs/*.c)
 
+C_SOURCES := $(sort $(C_SOURCES))
 S_SOURCES = $(wildcard arch/armv8/*.s)
 
 OBJECTS = $(patsubst %.c, $(BUILD_DIR)/%.o, $(C_SOURCES))

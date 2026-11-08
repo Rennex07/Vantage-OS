@@ -36,6 +36,8 @@ unsigned int gpio_function(unsigned int pin_number, unsigned int value);
 
 void uart_init();
 void uart_writeText(const char* buffer);
+void uart_writeHex(unsigned int d);
+char* uart_convertHexToString(unsigned int hex);
 void uart_write_bytes(const char* buffer, size_t length);
 /* Nonblocking: 0 means empty, 1 a byte, 2 receive overrun (discard the line). */
 uint32_t uart_read_byte(uint8_t* byte);

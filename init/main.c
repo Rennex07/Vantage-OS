@@ -7,8 +7,9 @@
 
 #ifndef VANTAGE_SIM
 #include "../includes/io.h"
+#include "../kernel/fs/include/fat.h"
 
-#include "../includes/sd.h"
+#include "../includes/sd.h" 
 #include "../includes/mmu.h"
 #include "../includes/parallel.h"
 #include "../includes/memory.h"
@@ -139,6 +140,7 @@ static void user_entry(void* argument) {
 }
 
 void main(uintptr_t dtb) {
+    unsigned int cluster;
     uart_init();
     if (!mm_prepare(dtb, (uintptr_t)_end))
         mm_halt("[ERR] Firmware memory discovery failed; boot halted\n");
@@ -167,6 +169,9 @@ void main(uintptr_t dtb) {
         mm_halt("[ERR] Four-core task scheduling self-test failed; boot halted\n");
     uart_writeText("[OK] Tasks executed concurrently on cores 0, 1, 2 and 3\n");
 
+    if (sd_init() == SD_OK) {
+        uart_writeText("[OK] SD DRIVER INITIALIZED! (main)\n");
+    }
 #if VANTAGE_STORAGE_VALIDATION
     /* Disposable hardware-validation image only. No automatic format or
      * destructive erase test: mount a deliberately provisioned data partition. */
@@ -183,7 +188,7 @@ void main(uintptr_t dtb) {
     uart_writeText("[INFO] SD storage disabled pending physical read/write validation\n");
 #endif
    
-    uart_writeText("[OK] Vantage booted!...\n");
+    uart_writeText("\n[OK] Vantage booted!...\n");
 
     TaskId app = task_create(user_entry, NULL);
     if (!app || task_run() != TASK_OK || task_reap(app, NULL) != TASK_OK)
