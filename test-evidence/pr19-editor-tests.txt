@@ -1,0 +1,64 @@
+Vantage OS | Storage, four-core scheduling and file editor | PR #19
+Commit: 17d6ab7aa45a5a1eeba2f95038afa18592cb9056
+GitHub Actions run: 42477659716 | Result: SUCCESS
+Rendered CI log excerpts from 2026-11-08 (UTC).
+
+> Persistent storage - AddressSanitizer / UBSan
+1/3 Test #1: persistent_files .................   Passed    1.07 sec
+2/3 Test #2: storage_recovery .................   Passed   10.07 sec
+3/3 Test #3: storage_process_reboot ...........   Passed    0.09 sec
+100% tests passed out of 3
+Total Test time (real) =  11.23 sec
+
+> Four-core host-thread scheduler - UBSan
+1/1 Test #1: scheduler_four_core ..............   Passed    0.05 sec
+100% tests passed out of 1
+Total Test time (real) =   0.05 sec
+
+> Linked AArch64 tests - modeled CPU/device state
+Memory                Ran 14 tests in 22.352s | OK
+Secondary startup     Ran 12 tests in 0.228s | OK
+Terminal              Ran 4 tests in 9.169s | OK
+Tasks                 Ran 17 tests in 2.629s | OK
+Four-core scheduler   Ran 8 tests in 25.389s | OK
+Files                 Ran 11 tests in 83.915s | OK
+Pi drivers            Ran 3 tests in 27.555s | OK
+SD storage            Ran 6 tests in 16.459s | OK
+
+> Probe recovery / EL0 editor regressions
+test_reboot_probe_does_not_repair_nonempty_corruption ... ok
+test_reboot_probe_recovers_committed_empty_creation_after_power_loss ... ok
+test_terminal_editor_saves_from_el0_through_file_syscalls ... ok
+
+> Desktop simulator / editor persistence across fresh processes
+5/23 Test  #5: terminal_storage_reboot ..........   Passed    0.12 sec
+7/23 Test  #7: terminal_smoke ...................   Passed    0.63 sec
+100% tests passed out of 23
+
+> Driver protocols - AddressSanitizer / UBSan
+1/6 Test #1: hardware_mailbox .................   Passed    0.10 sec
+2/6 Test #2: v3d_commands_and_mmu .............   Passed    0.02 sec
+3/6 Test #3: sdio_host ........................   Passed    0.01 sec
+4/6 Test #4: wifi_firmware_and_frames .........   Passed    0.03 sec
+5/6 Test #5: sd_controller ....................   Passed    0.04 sec
+6/6 Test #6: delays ...........................   Passed    0.01 sec
+100% tests passed out of 6
+
+> Image, configuration and firmware tools
+Ran 8 tests in 0.828s
+OK
+
+> Storage and scheduler boot gates / option rebuild
+test_default_boot_never_enters_storage ... ok
+test_failed_mount_or_probe_halts_before_app ... ok
+test_failed_multicore_probe_halts_before_storage_and_app ... ok
+test_opt_in_mount_probe_and_recovery_warning ... ok
+Ran 4 tests in 0.387s
+OK
+
+> Kernel builds - GitHub Actions step status
+Build kernel and test linked ARM paths: SUCCESS
+Build opt-in GPU path: SUCCESS
+
+Physical Pi storage, power-loss and multicore acceptance remain pending.
+Scheduling is cooperative. Normal boot keeps SD storage disabled.
