@@ -4,6 +4,20 @@
 #include "include/fat.h"
 #include "../../includes/sd.h"
 #include "../../includes/io.h"
+#include "../../includes/std.h"
+
+int memcmp(void* s1, void* s2, int n) {
+    unsigned char *a = s1, *b = s2;
+    while (n-->0) {
+        if (*a != *b) {
+            return *a - *b;
+        }
+        a++;
+        b++;
+    }
+
+    return 0;
+}
 
 extern unsigned char _end;
 
@@ -45,6 +59,8 @@ typedef struct {
     unsigned int size;
 } __attribute__((packed)) fatdir_t;
 
+static bpb_t g_bpb;
+
 int fat_getPartition(void) {
     unsigned char* mbr = &_end;
     bpb_t* bpb = (bpb_t*)&_end;
@@ -83,6 +99,8 @@ int fat_getPartition(void) {
         uart_writeText(bpb->spf16 > 0? "FAT16" : "FAT32");
         uart_writeText("\n");
 
+        g_bpb = *bpb;
+
         return 1;
     }
 
@@ -90,8 +108,8 @@ int fat_getPartition(void) {
 }
 
 void fat_listDirectory(void) {
-    bpb_t* bpb = (bpb_t*)&_end;
-    fatdir_t *dir = (fatdir_t*)&_end;
+    bpb_t* bpb = &g_bpb;
+    fatdir_t *dir = (fatdir_t*)(&_end + 512);
     
     unsigned int root_sec, s;
     root_sec = ((bpb->spf16 ? bpb->spf16 : bpb->spf32)* bpb->nf) + bpb->rsc;
@@ -110,18 +128,18 @@ void fat_listDirectory(void) {
     uart_writeText("\nFAT root directory LBA: ");
     uart_writeHex(root_sec);
 
-    if (sd_readBlock(root_sec, (unsigned char*)&_end, s/512+1)) {
-        uart_writeText("\nAttrib Cluster  Size     Name\n");
+    if (sd_readBlock(root_sec, (unsigned char*)dir, bpb->spc)) {
+        uart_writeText("\nAttrib Cluster   Size    Name\n");
 
         for (;dir->name[0] != 0; dir++) {
             if (dir->name[0] == 0xE5 || dir->attr[0] == 0xF) continue;
 
-            uart_writeHex(dir->attr[0] & 1 ? 'R' : '.'); // read-only
-            uart_writeHex(dir->attr[0] & 2 ?'H' : '.'); // hidden
-            uart_writeHex(dir->attr[0] & 4 ?'S' : '.'); // system
-            uart_writeHex(dir->attr[0] & 8 ? 'L' : '.'); // volume label
-            uart_writeHex(dir->attr[0] & 16 ? 'D' : '.'); // directory
-            uart_writeHex(dir->attr[0] & 32 ? 'A' : '.'); // archive
+            uart_writeText(uart_convertHexToString(dir->attr[0] & 1 ? 'R' : '.')); // read-only
+            uart_writeText(uart_convertHexToString(dir->attr[0] & 2 ?'H' : '.')); // hidden
+            uart_writeText(uart_convertHexToString(dir->attr[0] & 4 ?'S' : '.')); // system
+            uart_writeText(uart_convertHexToString(dir->attr[0] & 8 ? 'L' : '.')); // volume label
+            uart_writeText(uart_convertHexToString(dir->attr[0] & 16 ? 'D' : '.')); // directory
+            uart_writeText(uart_convertHexToString(dir->attr[0] & 32 ? 'A' : '.')); // archive
 
             uart_writeText(" ");
 
@@ -138,4 +156,84 @@ void fat_listDirectory(void) {
     } else {
         uart_writeText("[ERR] Unable to load root dir\n");
     }
+}
+
+unsigned int fat_getCluster(char *fn) {
+    bpb_t* bpb = &g_bpb;
+    fatdir_t* dir = (fatdir_t*)(&_end + 512);
+    unsigned int root_sec, s;
+
+    root_sec = ((bpb->spf16 ? bpb->spf16 : bpb->spf32)* bpb->nf) + bpb->rsc;
+    s = (bpb->nr0 + (bpb->nr1 << 8)) * sizeof(fatdir_t);
+    if (bpb->spf16 == 0) {
+        root_sec += (bpb->rc - 2)*bpb->spc;
+    }
+
+    root_sec += partitionlba;
+
+    if (sd_readBlock(root_sec, (unsigned char*)dir, bpb->spf16 ? s/512+1 : bpb->spc)) {
+        for (;dir->name[0] != 0; dir++) {
+            if (dir->name[0] == 0xE5 || dir->attr[0] == 0xF) continue;
+
+            if (!memcmp(dir->name, fn, 11)) {
+                uart_writeText("FAT File ");
+                uart_writeText(fn);
+                uart_writeText(" start at cluster: ");
+                uart_writeHex(((unsigned int)dir->ch) << 16 | dir->cl);
+                uart_writeText("\n");
+
+                return((unsigned int)dir->ch) << 16 | dir->cl;
+            }
+        }
+
+        uart_writeText("[ERR] File not found!\n");
+    } else {
+        uart_writeText("[ERR] Unable to load root directory");
+    }
+
+    return 0;
+}
+
+char* fat_readFile(unsigned int cluster) {
+    bpb_t* bpb = &g_bpb;
+    unsigned int* fat32 = (unsigned int*)(&_end + bpb->rsc*512);
+    unsigned short* fat16 = (unsigned short*)fat32;
+
+    unsigned int data_sec, s;
+    unsigned char *data, *ptr;
+
+    data_sec = ((bpb->spf16 ? bpb->spf16 : bpb->spf32)*bpb->nf) + bpb->rsc;
+    s = (bpb->nr0 + (bpb->nr1 << 8)) * sizeof(fatdir_t);
+    if (bpb->spf16 > 0) {
+        data_sec += (s + 511) >> 9;
+    }
+
+    data_sec += partitionlba;
+
+    uart_writeText("FAT Bytes per Sector: ");
+    uart_writeHex(bpb->bps0 + (bpb->bps1 << 8));
+    uart_writeText("\nFAT Sectors per Cluster: ");
+    uart_writeHex(bpb->spc);
+    uart_writeText("\nFAT Number of FAT: ");
+    uart_writeHex(bpb->nf);
+    uart_writeText("\nFAT Sectors per FAT: ");
+    uart_writeHex((bpb->spf16 ? bpb->spf16 : bpb->spf32));
+    uart_writeText("\nFAT Reserved Sectors count: ");
+    uart_writeHex(bpb->rsc);
+    uart_writeText("\nFAT First data sector: ");
+    uart_writeHex(data_sec);
+    uart_writeText("\n");
+
+    // load FAT table
+    s = sd_readBlock(partitionlba + 1, (unsigned char*)&_end + 512, (bpb->spf16 ? bpb->spf16 : bpb->spf32) + bpb->rsc);
+    // Fat ends here from memory
+    data = ptr=&_end + 512 + s;
+
+    // "(Yep, MS is full of lies. FAT32 is actually FAT28 only, no mistake, the upper 4 bits must be zero)" - bztsrc
+    while (cluster > 1 && cluster < (bpb->spf16 > 0 ? 0xFFF8 : 0x0FFFFFF8)) {
+        sd_readBlock((cluster - 2)*bpb->spc + data_sec, ptr, bpb->spc);
+        ptr += bpb->spc*(bpb->bps0 + (bpb->bps1 << 8));
+        cluster = bpb->spf16 > 0 ? fat16[cluster] : fat32[cluster];
+    }
+    return (char*)data;
 }

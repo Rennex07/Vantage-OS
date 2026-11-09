@@ -1,4 +1,5 @@
 out/
 sim/build/
+build/
 __pycache__/
 *.pyc

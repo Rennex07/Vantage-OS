@@ -36,4 +36,6 @@ void wait_cycles(unsigned int iterations) {
         __asm__ volatile("nop");
 #endif
     }
+
+    return ((unsigned long) h << 32) | l;
 }

@@ -120,6 +120,22 @@ void uart_writeText(const char *buffer) {
     }
 }
 
+void uart_writeHex(unsigned int d) {
+    uart_writeText("0x");
+
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        unsigned int n = (d >> shift) & 0xF;
+        uart_writeByteBlockingActual(n < 10 ? '0' + n : 'A' + (n - 10));
+    }
+}
+
+char* uart_convertHexToString(unsigned int hex) {
+    static char buf[2];
+    buf[0] = hex;
+    buf[1] = '\0';
+
+    return buf;
+}
 void uart_write_bytes(const char* buffer, size_t length) {
     size_t i;
     for (i = 0; i < length; i++) {
