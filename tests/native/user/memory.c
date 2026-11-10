@@ -5,7 +5,15 @@
 
 static uint64_t level1[4];
 static uint64_t level2[4][512];
-static uint64_t user_words[64];
+static union {
+    uint64_t words[64];
+    TouchEvent touch;
+    KeyEvent key;
+    TextRow row;
+    ConsoleInfo info;
+    ConsoleWrite write;
+    struct circle_args circle;
+} user_mem;
 static unsigned int reads, circles, keys, text_rows, buttons;
 
 uint32_t mm_block_mapped(uint64_t address) {
@@ -16,8 +24,8 @@ uint32_t mm_block_mapped(uint64_t address) {
 uint64_t handle_sys_call(uint64_t id, uint64_t arg);
 
 uint32_t user_buffer_valid(uintptr_t buffer, size_t size) {
-    return user_region_contains((uintptr_t)user_words,
-                                (uintptr_t)(user_words + 64), buffer, size);
+    return user_region_contains((uintptr_t)user_mem.words,
+                                (uintptr_t)(user_mem.words + 64), buffer, size);
 }
 
 void fb_wait_frame(void) {}
@@ -36,7 +44,7 @@ uint32_t canvas_text_columns(void) { return 60; }
 uint32_t canvas_text_rows(void) { return 50; }
 uint64_t sim_backbuffer_bytes(void) { return 800 * 480 * 4; }
 uint32_t canvas_text_row(const TextRow* row) {
-    if ((uintptr_t)row >= (uintptr_t)user_words && (uintptr_t)row < (uintptr_t)(user_words + 64)) return 0;
+    if ((uintptr_t)row >= (uintptr_t)user_mem.words && (uintptr_t)row < (uintptr_t)(user_mem.words + 64)) return 0;
     text_rows++;
     return row->length <= TEXT_MAX_COLUMNS;
 }
@@ -47,7 +55,7 @@ uint32_t key_read(KeyEvent* event) {
     return 1;
 }
 uint32_t canvas_button(const CanvasButton* button) {
-    if ((uintptr_t)button >= (uintptr_t)user_words && (uintptr_t)button < (uintptr_t)(user_words + 64)) return 0;
+    if ((uintptr_t)button >= (uintptr_t)user_mem.words && (uintptr_t)button < (uintptr_t)(user_mem.words + 64)) return 0;
     buttons++;
     return 1;
 }
@@ -61,10 +69,10 @@ void sys_canvas_fill_circle(int x, int y, int r) { (void)x; (void)y; (void)r; }
 void sys_canvas_present(void) {}
 
 int main(void) {
-    uintptr_t start = (uintptr_t)user_words;
-    uintptr_t end = (uintptr_t)(user_words + 64);
+    uintptr_t start = (uintptr_t)user_mem.words;
+    uintptr_t end = (uintptr_t)(user_mem.words + 64);
     TouchEvent kernel_event = { TOUCH_EVENT_NONE, 91, 92 };
-    struct circle_args* args = (struct circle_args*)user_words;
+    struct circle_args* args = &user_mem.circle;
     unsigned int g, i;
 
     mmu_populate_tables(level1, level2, 0x3e000000, 0x400000, 0x400000, 0x600000, 0x600000);
@@ -88,7 +96,7 @@ int main(void) {
      * or framebuffer Normal memory. Its reserved Device mapping takes priority. */
     mmu_populate_tables(level1, level2, 0x600000, 0x200000, 0x600000, 0x800000, 0x600000);
     if (((level2[0][3] >> 2) & 7) || ((level2[0][3] >> 6) & 3)) return 1;
-    if (!user_region_contains(start, end, start, sizeof(user_words)) ||
+    if (!user_region_contains(start, end, start, sizeof(user_mem.words)) ||
         user_region_contains(start, end, start - 1, 1) ||
         user_region_contains(start, end, end, 1) ||
         user_region_contains(start, end, end - 4, 8) ||
@@ -101,7 +109,7 @@ int main(void) {
     handle_sys_call(1, (uint64_t)(start + 1));
     if (reads || kernel_event.type != TOUCH_EVENT_NONE || kernel_event.x != 91) return 1;
     if (handle_sys_call(1, (uint64_t)start) != 1 || reads != 1 ||
-        ((TouchEvent*)user_words)->x != 12) return 1;
+        user_mem.touch.x != 12) return 1;
 
     args->x = 12; args->y = 34; args->r = 5;
     handle_sys_call(4, (uint64_t)(uintptr_t)&kernel_event);
@@ -120,15 +128,15 @@ int main(void) {
                 if (handle_sys_call(calls[call], invalid[pointer])) return 1;
         if (keys || text_rows || buttons || kernel_event.type != TOUCH_EVENT_NONE) return 1;
         if (!handle_sys_call(11, start) || buttons != 1) return 1;
-        if (!handle_sys_call(6, start) || keys != 1 || ((KeyEvent*)user_words)->character != 'a') return 1;
-        ((TextRow*)user_words)->length = 60;
+        if (!handle_sys_call(6, start) || keys != 1 || user_mem.key.character != 'a') return 1;
+        user_mem.row.length = 60;
         if (!handle_sys_call(7, start) || text_rows != 1) return 1;
-        if (!handle_sys_call(8, start) || ((ConsoleInfo*)user_words)->columns != 60 ||
-            ((ConsoleInfo*)user_words)->memory_kind != CONSOLE_MEMORY_HOST ||
-            ((ConsoleInfo*)user_words)->host_backbuffer_bytes != 1536000) return 1;
-        ((ConsoleWrite*)user_words)->length = CONSOLE_WRITE_MAX + 1;
+        if (!handle_sys_call(8, start) || user_mem.info.columns != 60 ||
+            user_mem.info.memory_kind != CONSOLE_MEMORY_HOST ||
+            user_mem.info.host_backbuffer_bytes != 1536000) return 1;
+        user_mem.write.length = CONSOLE_WRITE_MAX + 1;
         if (handle_sys_call(10, start)) return 1;
-        ((ConsoleWrite*)user_words)->length = 3;
+        user_mem.write.length = 3;
         if (handle_sys_call(10, start) != 3) return 1;
         if (handle_sys_call(12, 0) != 123456) return 1;
     }
