@@ -24,3 +24,6 @@ struct RenderBackend;
 /* After fb_init, core 0. Moves the current frame onto the backend's surface;
  * the backend object must stay valid until it reports retirement. */
 uint32_t fb_attach_backend(const struct RenderBackend* backend);
+/* The off-screen page the next fb_swap overwrites, for a backend self-test
+ * that may clobber it. NULL when the firmware pitch has row padding. */
+void* fb_hidden_page(void);

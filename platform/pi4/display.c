@@ -34,6 +34,11 @@ uint32_t fb_attach_backend(const RenderBackend* backend) {
     return render_attach(&renderer, backend);
 }
 
+void* fb_hidden_page(void) {
+    if (!backBuffer || fbPitch != renderer.width * 4) return NULL;
+    return (void*)((uintptr_t)fbBase + drawPage * pageHeight * fbPitch);
+}
+
 static void cache_flush(volatile void* addr, uint32_t size) {
     uintptr_t start = (uintptr_t)addr & ~63ULL;
     uintptr_t end = (uintptr_t)addr + size;

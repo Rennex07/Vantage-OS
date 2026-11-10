@@ -6,20 +6,22 @@ import unittest
 from unicorn import UC_HOOK_CODE
 from unicorn import arm64_const as regs
 from memory_management import Image, Machine, STATS
+from v3d_model import SURFACE, V3dDevice
 
 CONTEXT, OPS = 0x7000000, 0x7001000
 CALLBACK = 0x7100000
-TABLE, ARENA = 0x1000000, 0x1400000
+TABLE, ARENA, TARGET = 0x1000000, 0x1400000, 0x1800000
 GPU = 0x1000000
-HUB, CORE = 0xfec00000, 0xfec04000
+PIXELS = 64 * 64 * 4
+STATE, ERROR, STAGE = CONTEXT + 40, CONTEXT + 44, CONTEXT + 48
 
 
 class GpuMachine(Machine):
     def __init__(self, image):
         super().__init__(image)
-        self.clock, self.bin, self.render = 0, 255, 255
-        self.owner, self.stall = True, False
-        self.start, self.stop = 0, 0
+        self.clock, self.owner = 0, True
+        self.device = V3dDevice(lambda address, size: bytes(self.uc.mem_read(address, size)),
+                                lambda address, data: self.uc.mem_write(address, data))
         callbacks = ['read', 'write', 'time', 'owned', 'cache', 'physical', 'property']
         for i, name in enumerate(callbacks):
             address = CALLBACK + i * 4
@@ -27,6 +29,7 @@ class GpuMachine(Machine):
         self.uc.mem_write(OPS, struct.pack('<8Q', 0, *[CALLBACK + i * 4 for i in range(7)]))
 
     def word(self, address): return struct.unpack('<I', self.uc.mem_read(address, 4))[0]
+    def signed(self, address): return struct.unpack('<i', self.uc.mem_read(address, 4))[0]
 
     def callback(self, uc, address, size, name):
         args = [uc.reg_read(getattr(regs, f'UC_ARM64_REG_X{i}')) for i in range(5)]
@@ -35,42 +38,19 @@ class GpuMachine(Machine):
         elif name == 'physical': result = args[1]
         elif name == 'time': self.clock = (self.clock + 10000) & 0xffffffff; result = self.clock
         elif name == 'property':
-            self.assert_property(args[1], args[2], args[3]); result = 1
-        elif name == 'read':
-            result = {CORE: 0x04443356, CORE + 4: 2, HUB + 0xc: 0x100, HUB + 0x10: 0x100,
-                      CORE + 0x134: self.bin, CORE + 0x138: self.render}.get(args[1], 0)
-        elif name == 'write':
-            register, value = args[1:3]
-            if register == CORE + 0x168 and not self.stall: self.bin = (self.bin + 1) & 255
-            if register == CORE + 0x164: self.start = value
-            if register == CORE + 0x804 and value == 2: self.stop += 1
-            if register == CORE + 0x16c:
-                # Independent decode of only the generated clear/copy subset.
-                base = ARENA + self.start - GPU
-                data = bytes(uc.mem_read(base, value - self.start))
-                color = struct.unpack_from('<I', data, 11)[0]
-                generic = ARENA + 0x2000
-                self.assert_byte(generic, 125)
-                generic += 1
-                source = None
-                if uc.mem_read(generic, 1) == b'\x1e':
-                    source = ARENA + self.word(generic + 9) - GPU; generic += 13
-                self.assert_byte(generic, 26); generic += 1
-                self.assert_byte(generic, 29)
-                destination = ARENA + self.word(generic + 9) - GPU
-                pixels = self.word(CONTEXT + 36)
-                uc.mem_write(destination, bytes(uc.mem_read(source, pixels)) if source is not None else struct.pack('<I', color) * (pixels // 4))
-                self.render = (self.render + 1) & 255
+            assert args[3] == 2
+            values = self.device.property(args[1], list(struct.unpack('<2I', uc.mem_read(args[2], 8))))
+            uc.mem_write(args[2], struct.pack('<2I', *values)); result = 1
+        elif name == 'read': result = self.device.read(args[1])
+        elif name == 'write': self.device.write(args[1], args[2] & 0xffffffff)
         elif name == 'cache':
-            assert args[1] >= TABLE and args[1] + args[2] <= ARENA + 0x400000
+            assert TABLE <= args[1] and args[1] + args[2] <= TARGET + PIXELS
         uc.reg_write(regs.UC_ARM64_REG_X0, int(result))
         uc.reg_write(regs.UC_ARM64_REG_PC, uc.reg_read(regs.UC_ARM64_REG_X30))
 
-    def assert_byte(self, address, value): assert self.uc.mem_read(address, 1) == bytes([value])
-    def assert_property(self, tag, values, count):
-        assert count == 2
-        if tag == 0x30002: self.uc.mem_write(values + 4, struct.pack('<I', 500000000))
-        else: assert tag == 0x38030 and self.word(values) == 11
+    def start(self):
+        assert self.call('v3d_init', CONTEXT, OPS, TABLE, ARENA, 64, 64) == 1
+        assert self.call('v3d_self_test', CONTEXT, TARGET) == 1
 
 
 class DriverTests(unittest.TestCase):
@@ -82,18 +62,51 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(m.call('v3d_init', CONTEXT, OPS, TABLE, ARENA, 64, 64), 1)
         self.assertEqual(m.word(TABLE + (GPU >> 12) * 4), (ARENA >> 12) | 0x30000000)
         self.assertEqual(m.word(TABLE), 0)
-        self.assertEqual(m.call('v3d_self_test', CONTEXT), 1)
-        self.assertEqual(m.uc.mem_read(ARENA + 0x40000, 64 * 64 * 4), b'\0' * (64 * 64 * 4))
-        self.assertEqual(m.render, 2)
+        self.assertEqual(m.word(TABLE + ((GPU + 0x3000) >> 12) * 4), 0)
+        self.assertTrue(m.device.powered() and m.device.domain and m.device.clock)
+        self.assertEqual(m.call('v3d_self_test', CONTEXT, TARGET), 1)
+        self.assertEqual(m.uc.mem_read(ARENA + SURFACE, PIXELS), b'\0' * PIXELS)
+        # Clear, present, clear: both 8-bit counters started at 255.
+        self.assertEqual((m.device.bfc, m.device.rfc, m.device.render_jobs), (2, 2, 3))
+        self.assertEqual(m.device.presented, [TARGET])
+        self.assertFalse(m.device.target_mapped())
+        frame = bytes(range(256)) * (PIXELS // 256)
+        m.uc.mem_write(ARENA + SURFACE, frame)
+        self.assertEqual(m.call('v3d_present', CONTEXT, TARGET), 1)
+        self.assertEqual(bytes(m.uc.mem_read(TARGET, PIXELS)), frame)
+        self.assertFalse(m.device.target_mapped())
+        self.assertEqual(m.call('v3d_clear', CONTEXT, 0x80402010), 1)
+        self.assertEqual(bytes(m.uc.mem_read(ARENA + SURFACE, PIXELS)), struct.pack('<I', 0x80402010) * (PIXELS // 4))
+        self.assertEqual(m.call('v3d_surface', CONTEXT), ARENA + SURFACE)
+        self.assertEqual(m.call('v3d_stop', CONTEXT) & 0xffffffff, 0xffffffff)
+        self.assertTrue(m.device.off())
 
-    def test_linked_gpu_timeout_quarantines_context(self):
+    def test_linked_gpu_timeout_resets_and_releases(self):
+        m = GpuMachine(self.image)
+        m.start()
+        m.device.stall = True; m.clock = 0xffff0000
+        self.assertEqual(m.call('v3d_clear', CONTEXT, 0) & 0xffffffff, 0xffffffff)
+        self.assertEqual((m.signed(STATE), m.signed(ERROR), m.word(STAGE)), (-1, -1, 7))
+        self.assertTrue(m.device.off() and m.device.resets == 1)
+        self.assertEqual(m.call('v3d_surface', CONTEXT), 0)
+        self.assertEqual(m.call('v3d_clear', CONTEXT, 0) & 0xffffffff, (-6) & 0xffffffff)
+
+    def test_linked_gpu_bring_up_failures_stop_the_device(self):
+        for fault, stage, error in (('exists', 4, -3), ('domain_missing', 1, -2), ('bridge_stuck', 3, -1)):
+            with self.subTest(fault=fault):
+                m = GpuMachine(self.image)
+                setattr(m.device, fault, fault != 'exists')
+                self.assertEqual(m.call('v3d_init', CONTEXT, OPS, TABLE, ARENA, 64, 64) & 0xffffffff,
+                                 error & 0xffffffff)
+                self.assertEqual((m.signed(STATE), m.signed(ERROR), m.word(STAGE)), (-1, error, stage))
+                self.assertTrue(m.device.off())
+                self.assertEqual(m.device.bin_jobs, 0)
         m = GpuMachine(self.image)
         self.assertEqual(m.call('v3d_init', CONTEXT, OPS, TABLE, ARENA, 64, 64), 1)
-        m.stall = True; m.clock = 0xffff0000
-        self.assertEqual(m.call('v3d_clear', CONTEXT, 0, 0) & 0xffffffff, 0xffffffff)
-        self.assertTrue(m.stop)
-        self.assertEqual(m.call('v3d_pixels', CONTEXT, 0), 0)
-
+        m.device.corrupt = True
+        self.assertEqual(m.call('v3d_self_test', CONTEXT, TARGET) & 0xffffffff, (-5) & 0xffffffff)
+        self.assertEqual((m.signed(STATE), m.word(STAGE)), (-1, 9))
+        self.assertTrue(m.device.off())
     def test_freestanding_memcmp_unsigned_and_zero_length(self):
         m = Machine(self.image)
         m.uc.mem_write(STATS, b'\x00\x80\xffabcd')

@@ -1,4 +1,6 @@
 #include <vantage/kernel/render.h>
+#include <vantage/drivers/v3d.h>
+#include "v3d_model.h"
 #include <vantage/kernel/parallel_port.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +17,7 @@ void parallel_idle(void) {}
 void parallel_wake(void) {}
 void parallel_completion_barrier(void) {}
 void parallel_port_halt(const char* message) {
-    if (expect_halt) { puts("PASS: render backend seam, CPU equivalence, frame-preserving fallback and re-entry halt"); exit(0); }
+    if (expect_halt) { puts("PASS: render backend seam, V3D/CPU pixel equivalence, frame-preserving runtime fallback and re-entry halt"); exit(0); }
     fprintf(stderr, "%s", message);
     exit(1);
 }
@@ -103,8 +105,124 @@ static void step(Renderer* renderer, uint32_t* state) {
     CHECK(!memcmp(renderer->pixels, oracle, sizeof(oracle)) && !renderer->busy);
 }
 
-int main(void) {
-    Renderer renderer;
+/* The production V3D engine and adapter over the device model, compared
+ * against CPU rendering after every operation. */
+#define GW 160U
+#define GH 96U
+#define GBYTES (GW * GH * sizeof(uint32_t))
+static unsigned char gpu_table_storage[V3D_TABLE_BYTES + 65535U];
+static HW_ALIGN(4096) unsigned char gpu_arena[V3D_ARENA_BYTES];
+static HW_ALIGN(4096) uint32_t gpu_pages[2][GW * GH];
+static uint32_t reference[GW * GH], reference_page[GW * GH], standby[GW * GH];
+static uint32_t padded[2][(GW + 5) * GH];
+static int retirements;
+
+static void count_retirement(void* context) {
+    V3d* gpu = context;
+    CHECK(gpu->state < 0);
+    retirements++;
+}
+
+static void mirrored_present(Renderer* cpu, Renderer* accelerated, unsigned int page) {
+    memset(gpu_pages[page], 0x11, GBYTES);
+    render_present(accelerated, gpu_pages[page], GW);
+    render_present(cpu, reference_page, GW);
+    CHECK(!memcmp(gpu_pages[page], reference_page, GBYTES));
+}
+
+static void mirrored_step(Renderer* cpu, Renderer* accelerated, uint32_t* state) {
+    uint32_t kind = next(state) % 16, color = next(state) * 2654435761U;
+    if (kind < 2) {
+        render_fill(cpu, 0, 0, GW, GH, color);
+        render_fill(accelerated, 0, 0, GW, GH, color);
+    } else if (kind < 7) {
+        uint32_t x = next(state) % (GW + 2), y = next(state) % (GH + 2);
+        uint32_t w = next(state) % (GW + 2), h = next(state) % (GH + 2);
+        render_fill(cpu, x, y, w, h, color);
+        render_fill(accelerated, x, y, w, h, color);
+    } else if (kind < 12) {
+        uint32_t x = next(state) % GW, y = next(state) % GH;
+        render_pixel(cpu, x, y, color);
+        render_pixel(accelerated, x, y, color);
+    } else if (kind < 15) {
+        mirrored_present(cpu, accelerated, kind & 1);
+    } else {
+        /* Row padding is outside the GPU present contract. */
+        memset(padded, 0x22, sizeof(padded));
+        render_present(cpu, padded[0], GW + 5);
+        render_present(accelerated, padded[1], GW + 5);
+        CHECK(!memcmp(padded[0], padded[1], sizeof(padded[0])));
+    }
+    CHECK(!memcmp(cpu->pixels, accelerated->pixels, GBYTES) && !accelerated->busy);
+}
+
+static void gpu_session(int failure) {
+    V3dModel model;
+    V3d gpu;
+    RenderBackend backend;
+    Renderer cpu, accelerated;
+    uint32_t state = 1000 + (uint32_t)failure;
+    unsigned char* table = (unsigned char*)(((uintptr_t)gpu_table_storage + 65535U) & ~(uintptr_t)65535U);
+    memset(&gpu, 0, sizeof(gpu));
+    v3d_model_init(&model, table, gpu_arena);
+    v3d_model_add(&model, gpu_pages, sizeof(gpu_pages), 0x3000000U);
+    HwOps io = v3d_model_ops(&model);
+    retirements = 0;
+
+    /* A frame drawn before the backend exists must survive the switch. */
+    memset(reference, 0, sizeof(reference));
+    memset(standby, 0, sizeof(standby));
+    render_init(&cpu, reference, GW, GH);
+    render_init(&accelerated, standby, GW, GH);
+    for (unsigned int i = 0; i < 50; i++) mirrored_step(&cpu, &accelerated, &state);
+    CHECK(v3d_init(&gpu, &io, table, gpu_arena, GW, GH) == HW_OK);
+    CHECK(v3d_self_test(&gpu, gpu_pages[1]) == HW_OK && gpu.present);
+    v3d_render_backend(&gpu, &backend);
+    backend.retired = count_retirement;
+    CHECK(backend.surface && render_attach(&accelerated, &backend));
+    CHECK(!memcmp(reference, accelerated.pixels, GBYTES));
+
+    unsigned int jobs = model.render_jobs;
+    for (unsigned int i = 0; i < 400; i++) {
+        mirrored_step(&cpu, &accelerated, &state);
+        CHECK(v3d_model_quiet(&model));
+    }
+    /* Full fills and tight presents ran on the device; nothing faulted. */
+    CHECK(model.render_jobs > jobs + 60 && !model.mmu_faults && !retirements);
+    CHECK(accelerated.backend == &backend && gpu.state == V3D_READY);
+    if (failure < 0) {
+        CHECK(v3d_stop(&gpu) == V3D_STOPPED);
+        v3d_model_free(&model);
+        return;
+    }
+
+    for (uint32_t i = 0; i < GW * GH; i += 5) {
+        render_pixel(&cpu, i % GW, i / GW, i * 97U);
+        render_pixel(&accelerated, i % GW, i / GW, i * 97U);
+    }
+    int quarantined = failure == 3;
+    if (failure == 0 || failure == 1) model.stall_render = 1;
+    if (failure == 2) model.fault_render = 1;
+    if (failure == 3) model.stall_bin = model.bridge_stuck = 1;
+    if (failure == 4) model.tlb_stuck = 1;
+    if (failure == 0 || failure == 3) {
+        render_fill(&cpu, 0, 0, GW, GH, 0x00c0ffeeU);
+        render_fill(&accelerated, 0, 0, GW, GH, 0x00c0ffeeU);
+    } else mirrored_present(&cpu, &accelerated, 0);
+    CHECK(retirements == 1 && !accelerated.backend && accelerated.pixels == standby);
+    CHECK(!memcmp(reference, standby, GBYTES));
+    CHECK(gpu.state == (quarantined ? V3D_QUARANTINED : V3D_STOPPED));
+    CHECK(quarantined || v3d_model_off(&model));
+
+    /* The session continues on the CPU without touching the device again. */
+    unsigned int writes = model.register_writes, calls = model.cache_calls;
+    for (unsigned int i = 0; i < 300; i++) mirrored_step(&cpu, &accelerated, &state);
+    mirrored_present(&cpu, &accelerated, 1);
+    CHECK(retirements == 1 && model.register_writes == writes && model.cache_calls == calls);
+    v3d_model_free(&model);
+}
+
+int main(void) {    Renderer renderer;
     uint32_t state = 7;
     render_init(&renderer, cpu_pixels, W, H);
     for (unsigned int i = 0; i < 2000; i++) step(&renderer, &state);
@@ -150,6 +268,8 @@ int main(void) {
     render_present(&renderer, NULL, W);
     render_present(&renderer, shown, W - 1);
     CHECK(!memcmp(cpu_pixels, oracle, sizeof(oracle)));
+
+    for (int failure = -1; failure <= 4; failure++) gpu_session(failure);
 
     /* Drawing while an operation is in flight is re-entry and must halt. */
     expect_halt = 1;
