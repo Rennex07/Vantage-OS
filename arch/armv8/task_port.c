@@ -1,4 +1,6 @@
 #include <vantage/kernel/task_port.h>
+#include <vantage/arch/mmu.h>
+#include <vantage/arch/trap.h>
 #include <vantage/platform/pi4/io.h>
 
 typedef char context_size_must_match_assembly[(sizeof(TaskContext) == 208) ? 1 : -1];
@@ -37,6 +39,23 @@ void task_context_init(TaskContext* context, void* stack, size_t size,
 
 void task_context_dispose(TaskContext* context) {
     (void)context;
+}
+
+void task_port_address_space(uint64_t root) {
+    mmu_install_space(root);
+}
+
+/* EL0t. Interrupts stay masked until the scheduler handles the timer tick. */
+#define USER_STATE 0x3c0ULL
+
+void task_port_enter_user(uint64_t entry, uint64_t stack, uint64_t argument) {
+    /* Nothing of the kernel's register state may reach EL0. */
+    TrapFrame frame __attribute__((aligned(16))) = {0};
+    frame.x[0] = argument;
+    frame.sp_el0 = stack;
+    frame.elr = entry;
+    frame.spsr = USER_STATE;
+    trap_return(&frame);
 }
 
 void task_port_halt(const char* message) {

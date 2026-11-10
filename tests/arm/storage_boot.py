@@ -19,14 +19,14 @@ def boot(image, mount=0, probe=0, task_probe=1):
               'secondary_core_start': 1, 'env_Init': 0, 'mmu_is_enabled': 1, 'irq_init_core': 1,
               'parallel_init': 1, 'parallel_self_test': 1, 'pi4_drivers_start': 0,
               'task_init': 1, 'task_self_test': 1, 'task_multicore_self_test': task_probe, 'storage_start': mount,
-              'storage_reboot_probe': probe, 'task_create': 1, 'sd_init': 0}
+              'storage_reboot_probe': probe, 'process_create': 1, 'sd_init': 0}
 
     def stub(uc, address, size, name):
         args = (uc.reg_read(regs.UC_ARM64_REG_X0), uc.reg_read(regs.UC_ARM64_REG_X1))
         events.append((name, args))
         if name == 'uart_writeText':
             messages.append(bytes(uc.mem_read(args[0], 256)).split(b'\0', 1)[0])
-        if name == 'task_create':
+        if name == 'process_create':
             uc.emu_stop()
             return
         uc.reg_write(regs.UC_ARM64_REG_X0, values[name] & 0xffffffffffffffff)
@@ -49,7 +49,7 @@ class BootTests(unittest.TestCase):
     def test_default_boot_never_enters_storage(self):
         m, events, log = boot(self.default)
         self.assertFalse(m.failure)
-        self.assertIn('task_create', [name for name, _ in events])
+        self.assertIn('process_create', [name for name, _ in events])
         self.assertNotIn('storage_start', [name for name, _ in events])
         self.assertNotIn('sd_init', [name for name, _ in events])
         self.assertIn(b'SD storage disabled', log)
@@ -61,14 +61,14 @@ class BootTests(unittest.TestCase):
             self.assertIn(('storage_start', (100000000, 1)), events)
             names = [name for name, _ in events]
             self.assertLess(names.index('storage_start'), names.index('storage_reboot_probe'))
-            self.assertLess(names.index('storage_reboot_probe'), names.index('task_create'))
+            self.assertLess(names.index('storage_reboot_probe'), names.index('process_create'))
             self.assertEqual(b'[WARN] Storage recovered' in log, bool(recovered))
 
     def test_failed_mount_or_probe_halts_before_app(self):
         for mount, probe in ((-8, 0), (0, -9)):
             m, events, _ = boot(self.validation, mount, probe)
             self.assertTrue(m.failure)
-            self.assertNotIn('task_create', [name for name, _ in events])
+            self.assertNotIn('process_create', [name for name, _ in events])
             if mount < 0:
                 self.assertNotIn('storage_reboot_probe', [name for name, _ in events])
 
@@ -77,7 +77,7 @@ class BootTests(unittest.TestCase):
         self.assertTrue(m.failure)
         names = [name for name, _ in events]
         self.assertNotIn('storage_start', names)
-        self.assertNotIn('task_create', names)
+        self.assertNotIn('process_create', names)
 
 
 if __name__ == '__main__':

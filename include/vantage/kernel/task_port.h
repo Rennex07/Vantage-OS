@@ -20,3 +20,9 @@ void task_context_init(TaskContext* context, void* stack, size_t size,
 void task_context_dispose(TaskContext* context);
 void task_context_switch(TaskContext* previous, const TaskContext* next);
 void task_port_halt(const char* message);
+/* Installs a process root (with its ASID) as the calling core's user half;
+ * 0 leaves only the kernel mapped. Called with the scheduler lock held. */
+void task_port_address_space(uint64_t root);
+/* Enters EL0 on the calling task's kernel stack with every other register
+ * cleared. Does not return on ARM. */
+void task_port_enter_user(uint64_t entry, uint64_t stack, uint64_t argument);

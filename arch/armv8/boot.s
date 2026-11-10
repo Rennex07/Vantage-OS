@@ -108,19 +108,3 @@ boot_memory_rejected:
     // UART initialization needs validated memory. Reject without further writes.
     wfe
     b boot_memory_rejected
-
-.global enter_user_space
-enter_user_space:
-    msr elr_el1, x0
-    // Interrupt delivery is not configured yet; keep tasks non-preemptible.
-    mov x2, #0x3c0
-    msr spsr_el1, x2
-    msr sp_el0, x1
-    adr x30, user_task_returned
-    eret
-
-user_task_returned:
-    mov x0, #0
-    mov x8, #18 // SYS_TASK_EXIT
-    svc #0
-    b user_task_returned

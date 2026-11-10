@@ -1,124 +1,124 @@
-"""Run linked terminal/app/syscall code with mocked exceptions and devices.
+"""Run the built-in terminal as an isolated EL0 process on the linked kernel.
 
 Usage: python tests/arm/terminal.py path/to/kernel8.elf -v
 Requires the same Unicorn/Capstone dependencies as memory_management.py.
-The SVC handoff is modeled here; this does not prove ARM privilege enforcement.
+The embedded program image is loaded by process_create and runs under its own
+translation tables with real SVC entry; devices are mocked at the kernel's
+driver functions. See cpu.py for what the CPU model does and does not cover.
 """
 import struct
 import sys
 import unittest
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_WRITE
 from unicorn import arm64_const as regs
 
-from memory_management import Image, Machine, RETURN
+from cpu import CpuMachine, X, USER_BASE, USER_END, OK
+from memory_management import Image, Machine
 
-TRAP_RETURN = RETURN + 0x100
+FRAME_WAIT = 9
+STACK_BYTES = 16384
 
 
-class AppMachine(Machine):
+class TerminalMachine(CpuMachine):
     def __init__(self, image):
         super().__init__(image)
         self.keys, self.touches, self.rows, self.output = [], [], {}, bytearray()
         self.buttons = []
-        self.clock_us = 0
-        self.trap_context = None
-        self.stack_writes = []
+        self.app_clock_us = 0
         self.presentations = 0
-        self.user_bottom = image.symbols['user_stack']
-        self.user_top = self.user_bottom + 4096
-        self.uc.mem_write(self.user_bottom, b'\xa7' * 64)
-        self.uc.hook_add(UC_HOOK_MEM_WRITE, lambda uc, access, a, s, v, _: self.stack_writes.append(a),
-                         begin=self.user_bottom, end=self.user_top - 1)
-        self.uc.hook_add(UC_HOOK_CODE, self.trap_return, begin=TRAP_RETURN, end=TRAP_RETURN)
-        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
-        decoder.skipdata = True
-        for ins in decoder.disasm(image.section_bytes(image.named['.text']), image.named['.text'][3]):
-            if ins.mnemonic == 'svc':
-                self.uc.hook_add(UC_HOOK_CODE, self.trap, begin=ins.address, end=ins.address)
-        for name in ('key_read', 'touch_read', 'canvas_button', 'canvas_text_row', 'canvas_text_columns', 'canvas_text_rows',
-                     'canvas_clear', 'canvas_present', 'fb_wait_frame', 'time_us', 'uart_write_bytes'):
-            address = image.symbols[name]
-            self.uc.hook_add(UC_HOOK_CODE, self.device, user_data=name, begin=address, end=address)
+        self.parked = False
+        self.lowest_user_sp = USER_END
+        self.stub('canvas_text_columns', result=60)
+        self.stub('canvas_text_rows', result=50)
+        self.stub('key_read', self.key)
+        self.stub('touch_read', self.touch)
+        self.stub('canvas_text_row', self.text_row)
+        self.stub('canvas_button', self.button)
+        self.stub('canvas_present', self.present)
+        self.stub('canvas_clear', lambda *_: self.rows.clear())
+        self.stub('time_us', lambda *_: self.app_clock_us & 0xffffffff)
+        self.stub('uart_write_bytes', lambda pointer, length, *_: self.output.extend(self.uc.mem_read(pointer, length)))
+        for name in ('fb_wait_frame', 'pi4_drivers_poll', 'canvas_set_color'):
+            self.stub(name)
 
-    def trap(self, uc, address, size, _):
-        if self.trap_context is not None:
-            raise AssertionError('Nested SVC')
-        self.trap_context = (uc.context_save(), address + size, self.level, self.daif)
-        argument = uc.reg_read(regs.UC_ARM64_REG_X0)
-        call = uc.reg_read(regs.UC_ARM64_REG_X8)
-        self.level, self.daif = 4, 0x3c0
-        uc.reg_write(regs.UC_ARM64_REG_SP, self.image.symbols['__kernel_stack_top'])
-        uc.reg_write(regs.UC_ARM64_REG_X0, call)
-        uc.reg_write(regs.UC_ARM64_REG_X1, argument)
-        uc.reg_write(regs.UC_ARM64_REG_X30, TRAP_RETURN)
-        uc.reg_write(regs.UC_ARM64_REG_PC, self.image.symbols['handle_sys_call'])
+    def key(self, pointer, *_):
+        event = self.keys.pop(0) if self.keys else (0, 0)
+        self.uc.mem_write(pointer, struct.pack('<2I', *event))
+        return bool(event[0])
 
-    def trap_return(self, uc, address, size, _):
-        result = uc.reg_read(regs.UC_ARM64_REG_X0)
-        context, pc, self.level, self.daif = self.trap_context
-        self.trap_context = None
-        uc.context_restore(context)
-        uc.reg_write(regs.UC_ARM64_REG_X0, result)
-        uc.reg_write(regs.UC_ARM64_REG_PC, pc)
+    def touch(self, pointer, *_):
+        event = self.touches.pop(0) if self.touches else (0, 0, 0)
+        self.uc.mem_write(pointer, struct.pack('<Iii', *event))
+        return bool(event[0])
 
-    def device(self, uc, address, size, name):
-        arg = uc.reg_read(regs.UC_ARM64_REG_X0)
-        result = 0
-        if name == 'canvas_text_columns': result = 60
-        elif name == 'canvas_text_rows': result = 50
-        elif name == 'key_read':
-            event = self.keys.pop(0) if self.keys else (0, 0)
-            uc.mem_write(arg, struct.pack('<2I', *event))
-            result = bool(event[0])
-        elif name == 'touch_read':
-            event = self.touches.pop(0) if self.touches else (0, 0, 0)
-            uc.mem_write(arg, struct.pack('<Iii', *event))
-            result = bool(event[0])
-        elif name == 'canvas_text_row':
-            row, length, fg, bg, cursor, text = struct.unpack('<5I96s', uc.mem_read(arg, 116))
-            assert row < 50 and length == 60
-            self.rows[row] = text[:length].decode('ascii').rstrip()
-            result = 1
-        elif name == 'canvas_button':
-            button = struct.unpack('<8I8s', uc.mem_read(arg, 40))
-            assert button[0] + button[2] <= 480 and button[1] + button[3] <= 800
-            self.buttons.append(button)
-            result = 1
-        elif name == 'canvas_present': self.presentations += 1
-        elif name == 'time_us': result = self.clock_us & 0xffffffff
-        elif name == 'canvas_clear': self.rows.clear()
-        elif name == 'uart_write_bytes':
-            self.output.extend(uc.mem_read(arg, uc.reg_read(regs.UC_ARM64_REG_X1)))
-        uc.reg_write(regs.UC_ARM64_REG_X0, int(result))
-        uc.reg_write(regs.UC_ARM64_REG_PC, uc.reg_read(regs.UC_ARM64_REG_X30))
+    def text_row(self, pointer, *_):
+        row, length, fg, bg, cursor, text = struct.unpack('<5I96s', self.uc.mem_read(pointer, 116))
+        assert row < 50 and length == 60
+        assert not USER_BASE <= pointer < USER_END, 'drawing received a user pointer'
+        self.rows[row] = text[:length].decode('ascii').rstrip()
+        return 1
 
-    def call_user(self, name):
-        self.level, self.daif = 0, 0
-        self.uc.reg_write(regs.UC_ARM64_REG_SP, self.user_top)
-        self.uc.reg_write(regs.UC_ARM64_REG_X30, RETURN)
-        self.uc.emu_start(self.image.symbols[name], RETURN + 4, timeout=30000000, count=80000000)
-        assert self.uc.reg_read(regs.UC_ARM64_REG_PC) == RETURN
-        assert self.trap_context is None
-        assert self.uc.mem_read(self.user_bottom, 64) == b'\xa7' * 64
-        assert min(self.stack_writes) >= self.user_bottom + 64
+    def button(self, pointer, *_):
+        button = struct.unpack('<8I8s', self.uc.mem_read(pointer, 40))
+        assert button[0] + button[2] <= 480 and button[1] + button[3] <= 800
+        self.buttons.append(button)
+        return 1
+
+    def present(self, *_):
+        self.presentations += 1
+
+    def syscall(self, uc, address, size, _):
+        if self.parked:
+            self.parked = False   # Resuming the frame wait that ended the last step.
+            return
+        super().syscall(uc, address, size, _)
+        self.lowest_user_sp = min(self.lowest_user_sp, uc.reg_read(regs.UC_ARM64_REG_SP_EL0))
+        if uc.reg_read(X[0]) == FRAME_WAIT:
+            self.parked = True
+            self.cpu.idle = True
+            uc.emu_stop()
+
+    def launch(self, booted=False):
+        """Boot, start the embedded terminal and run its first frame."""
+        if not booted:
+            self.boot(cores=1)
+        start, end = self.image.symbols['terminal_image'], self.image.symbols['terminal_image_end']
+        self.app = self.call('process_create', start, end - start, 1)
+        assert self.app
+        self.start('task_run')
+        self.step()
+
+    def step(self):
+        """Finish the pending frame wait and run one application step."""
+        assert self.run(until=lambda: self.parked, cores=1, rounds=200000) is None, 'terminal exited'
 
     def command(self, text):
         self.keys.extend((1, ord(c)) for c in text)
         self.keys.append((2, 0))
-        while self.keys: self.call_user('terminal_app_step')
+        while self.keys: self.step()
 
 
 class TerminalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.image = Image(sys.argv[1])
 
-    def test_linked_app_uses_user_stack_and_real_kernel_stats(self):
-        m = AppMachine(self.image)
-        m.initialize()
-        m.call_user('terminal_app_init')
-        m.call_user('terminal_app_step')
+    def test_embedded_program_is_a_separately_linked_user_image(self):
+        start, end = self.image.symbols['terminal_image'], self.image.symbols['terminal_image_end']
+        m = Machine(self.image)
+        magic, entry, text, rodata, data, bss = struct.unpack('<6Q', m.uc.mem_read(start, 48))
+        self.assertEqual(magic, 0x31676d4945544e56)
+        self.assertEqual((text % 4096, rodata % 4096), (0, 0))
+        self.assertEqual(text + rodata + data, end - start)
+        self.assertTrue(USER_BASE + 48 <= entry < USER_BASE + text)
+        self.assertGreater(bss, 4096)   # The terminal model lives in the process, not the kernel.
+        # Application and syscall-wrapper code is no longer part of the kernel link.
+        for name in ('user_task', 'terminal_app_step', 'terminal_init', 'sys_frame_wait', 'user_stack',
+                     '__user_start', 'enter_user_space'):
+            self.assertNotIn(name, self.image.symbols)
+
+    def test_isolated_app_uses_its_own_stack_and_real_kernel_stats(self):
+        m = TerminalMachine(self.image)
+        m.launch()
         self.assertEqual(m.rows[0], 'Vantage terminal')
         self.assertEqual(m.rows[3], '>')
         m.command('help')
@@ -134,51 +134,62 @@ class TerminalTests(unittest.TestCase):
         # Tap H, E, L, P and ENTER through the linked touch syscall path.
         for x, y in ((286, 661), (124, 611), (425, 661), (448, 611), (425, 761)):
             m.touches.extend(((1, x, y), (3, x, y)))
-        m.call_user('terminal_app_step')
+        m.step()
         self.assertIn('help   Show commands', m.output.decode())
         self.assertGreater(m.presentations, 0)
+        # Every kernel entry came from EL0 inside the process's address space.
+        asid = m.process_field(m.app, 36, 4)
+        self.assertTrue(asid)
+        self.assertEqual({caller for _, caller, *_ in m.syscalls}, {asid})
+        self.assertEqual({(kind, origin) for _, kind, origin, _ in m.entries}, {('sync', 0)})
+        self.assertTrue(all(USER_BASE <= pc < USER_END for *_, pc in m.entries))
+        # A stack overflow would fault on the unmapped page below the stack.
+        self.assertGreater(m.lowest_user_sp, USER_END - STACK_BYTES)
+        self.assertEqual(m.interject('process_info', m.app, 0x7bff000), OK)
+        self.assertEqual(struct.unpack('<QI', m.uc.mem_read(0x7bff000, 12))[1], 2)   # Still live.
 
     def test_delete_hold_delay_repeat_release_drag_and_clock_wrap(self):
-        m = AppMachine(self.image)
-        m.initialize()
-        m.call_user('terminal_app_init')
+        m = TerminalMachine(self.image)
+        m.launch()
         m.command('clear')
         m.keys.extend((1, ord(c)) for c in 'abcdef')
-        m.clock_us = 0xfffffff0
+        m.app_clock_us = 0xfffffff0
         m.touches.append((1, 435, 711))
-        m.call_user('terminal_app_step')
+        m.step()
         self.assertEqual(m.rows[0], '> abcde')  # First delete is immediate.
         for elapsed, expected in ((399999, '> abcde'), (1, '> abcd'),
                                   (69999, '> abcd'), (1, '> abc'), (1000000, '> ab')):
-            m.clock_us += elapsed
-            m.call_user('terminal_app_step')
+            m.app_clock_us += elapsed
+            m.step()
             self.assertEqual(m.rows[0], expected)
         m.touches.append((3, 435, 711))
-        m.clock_us += 1000000
-        m.call_user('terminal_app_step')
+        m.app_clock_us += 1000000
+        m.step()
         self.assertEqual(m.rows[0], '> ab')  # No release delete or late repeat.
         m.touches.append((1, 435, 711))
-        m.call_user('terminal_app_step')
+        m.step()
         self.assertEqual(m.rows[0], '> a')
         m.touches.append((2, 0, 500))
-        m.clock_us += 1000000
-        m.call_user('terminal_app_step')
+        m.app_clock_us += 1000000
+        m.step()
         self.assertEqual(m.rows[0], '> a')  # Drag out stops repeat.
         m.touches.append((3, 435, 711))
-        m.call_user('terminal_app_step')
+        m.step()
         self.assertEqual(m.rows[0], '> a')
         m.touches.append((1, 435, 711))
-        m.call_user('terminal_app_step')
+        m.step()
         for _ in range(3):
-            m.clock_us += 500000
-            m.call_user('terminal_app_step')
+            m.app_clock_us += 500000
+            m.step()
             self.assertEqual(m.rows[0], '>')  # Empty input stays bounded.
 
-    def test_linked_syscall_rejects_nonuser_buffers(self):
-        m = AppMachine(self.image)
-        start, end = self.image.symbols['__user_start'], self.image.symbols['__user_end']
-        for call in (6, 7, 8, 10, 11):
-            for pointer in (0, self.image.symbols['__kernel_stack_top'] - 256, start + 1, end - 4):
+    def test_linked_syscall_rejects_buffers_from_kernel_callers(self):
+        # Without a calling process there is no address space to resolve against.
+        m = TerminalMachine(self.image)
+        m.boot(cores=1)
+        for call in (1, 4, 6, 7, 8, 10, 11):
+            for pointer in (0, self.image.symbols['__kernel_stack_top'] - 256, USER_BASE, USER_BASE + 4096,
+                            USER_END - 256):
                 with self.subTest(call=call, pointer=hex(pointer)):
                     self.assertEqual(m.call('handle_sys_call', call, pointer), 0)
         self.assertEqual(m.output, b'')

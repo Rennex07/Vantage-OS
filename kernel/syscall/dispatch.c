@@ -4,6 +4,7 @@
 #include <vantage/kernel/canvas.h>
 #include <vantage/kernel/platform.h>
 #include <vantage/kernel/files.h>
+#include <vantage/kernel/user_access.h>
 #include <vantage/drivers/key.h>
 #include <vantage/drivers/touch.h>
 
@@ -11,8 +12,18 @@
 #include <vantage/platform/pi4/io.h>
 #include <vantage/platform/pi4/drivers.h>
 #include <vantage/kernel/memory.h>
-#include <vantage/kernel/task.h>
+#include <vantage/kernel/process.h>
 #endif
+
+/* Payloads are copied between the calling process and the kernel stack; no
+ * service ever receives a user pointer. Alignment is part of the ABI. */
+static uint32_t fetch(void* payload, uint64_t address, size_t size, unsigned int alignment) {
+    return !(address % alignment) && user_copy_in(payload, (uintptr_t)address, size);
+}
+
+static uint32_t writable(uint64_t address, size_t size, unsigned int alignment) {
+    return !(address % alignment) && user_access_ok((uintptr_t)address, size, 1);
+}
 
 uint64_t handle_sys_call(uint64_t syscall_id, uint64_t arg0) {
 #ifndef VANTAGE_SIM
@@ -34,15 +45,17 @@ uint64_t handle_sys_call(uint64_t syscall_id, uint64_t arg0) {
 #ifdef VANTAGE_SIM
         const uint64_t owner = 1; /* One host app, without emulated task contexts. */
 #else
-        const uint64_t owner = task_current();
+        /* Handles belong to the calling process, or to a kernel task. */
+        const uint64_t owner = process_current() ? process_current() : task_current();
 #endif
         return (uint64_t)handle_file_call(syscall_id, (uintptr_t)arg0, owner);
     }
     if (syscall_id == SYS_TOUCH_READ) {
-        if (arg0 % sizeof(uint32_t) ||
-            !user_buffer_valid((uintptr_t)arg0, sizeof(TouchEvent))) return 0;
+        TouchEvent event;
+        if (!writable(arg0, sizeof(event), sizeof(uint32_t))) return 0;
         fb_wait_frame();
-        return touch_read((TouchEvent*)arg0);
+        uint32_t result = touch_read(&event);
+        return user_copy_out((uintptr_t)arg0, &event, sizeof(event)) ? result : 0;
     }
     else if (syscall_id == SYS_CANVAS_SET_COLOR) {
         // Set Color (arg0 is the color value)
@@ -54,9 +67,8 @@ uint64_t handle_sys_call(uint64_t syscall_id, uint64_t arg0) {
     }
     else if (syscall_id == SYS_CANVAS_FILL_CIRCLE) {
         // Fill Circle (arg0 is pointer to struct circle_args)
-        if (arg0 % sizeof(uint32_t) ||
-            !user_buffer_valid((uintptr_t)arg0, sizeof(struct circle_args))) return 0;
-        const struct circle_args args = *(const struct circle_args*)arg0;
+        struct circle_args args;
+        if (!fetch(&args, arg0, sizeof(args), sizeof(uint32_t))) return 0;
         canvas_fill_circle(args.x, args.y, args.r);
     }
     else if (syscall_id == SYS_CANVAS_PRESENT) {
@@ -68,17 +80,19 @@ uint64_t handle_sys_call(uint64_t syscall_id, uint64_t arg0) {
 #endif
     }
     else if (syscall_id == SYS_KEY_READ) {
-        if (arg0 % sizeof(uint32_t) || !user_buffer_valid((uintptr_t)arg0, sizeof(KeyEvent))) return 0;
-        return key_read((KeyEvent*)(uintptr_t)arg0);
+        KeyEvent event;
+        if (!writable(arg0, sizeof(event), sizeof(uint32_t))) return 0;
+        uint32_t result = key_read(&event);
+        return user_copy_out((uintptr_t)arg0, &event, sizeof(event)) ? result : 0;
     }
     else if (syscall_id == SYS_CANVAS_TEXT_ROW) {
-        if (arg0 % sizeof(uint32_t) || !user_buffer_valid((uintptr_t)arg0, sizeof(TextRow))) return 0;
-        const TextRow row = *(const TextRow*)(uintptr_t)arg0;
+        TextRow row;
+        if (!fetch(&row, arg0, sizeof(row), sizeof(uint32_t))) return 0;
         return canvas_text_row(&row);
     }
     else if (syscall_id == SYS_CONSOLE_INFO) {
         ConsoleInfo info = {0};
-        if (arg0 % sizeof(uint64_t) || !user_buffer_valid((uintptr_t)arg0, sizeof(info))) return 0;
+        if (!writable(arg0, sizeof(info), sizeof(uint64_t))) return 0;
         info.columns = canvas_text_columns();
         info.rows = canvas_text_rows();
 #ifdef VANTAGE_SIM
@@ -87,8 +101,7 @@ uint64_t handle_sys_call(uint64_t syscall_id, uint64_t arg0) {
 #else
         if (mm_stats(&info.memory)) info.memory_kind = CONSOLE_MEMORY_KERNEL;
 #endif
-        *(ConsoleInfo*)(uintptr_t)arg0 = info;
-        return 1;
+        return user_copy_out((uintptr_t)arg0, &info, sizeof(info));
     }
     else if (syscall_id == SYS_FRAME_WAIT) {
         fb_wait_frame();
@@ -98,8 +111,8 @@ uint64_t handle_sys_call(uint64_t syscall_id, uint64_t arg0) {
 #endif
     }
     else if (syscall_id == SYS_CONSOLE_WRITE) {
-        if (arg0 % sizeof(uint32_t) || !user_buffer_valid((uintptr_t)arg0, sizeof(ConsoleWrite))) return 0;
-        const ConsoleWrite request = *(const ConsoleWrite*)(uintptr_t)arg0;
+        ConsoleWrite request;
+        if (!fetch(&request, arg0, sizeof(request), sizeof(uint32_t))) return 0;
         if (request.length > CONSOLE_WRITE_MAX) return 0;
 #ifndef VANTAGE_SIM
         uart_write_bytes(request.text, request.length);
@@ -108,8 +121,8 @@ uint64_t handle_sys_call(uint64_t syscall_id, uint64_t arg0) {
     }
 
     else if (syscall_id == SYS_CANVAS_BUTTON) {
-        if (arg0 % sizeof(uint32_t) || !user_buffer_valid((uintptr_t)arg0, sizeof(CanvasButton))) return 0;
-        const CanvasButton button = *(const CanvasButton*)(uintptr_t)arg0;
+        CanvasButton button;
+        if (!fetch(&button, arg0, sizeof(button), sizeof(uint32_t))) return 0;
         return canvas_button(&button);
     }
     else if (syscall_id == SYS_TIME_US) return time_us();

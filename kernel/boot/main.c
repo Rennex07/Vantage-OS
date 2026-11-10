@@ -3,7 +3,7 @@
 #include <vantage/arch/irq.h>
 #include <vantage/kernel/parallel.h>
 #include <vantage/kernel/memory.h>
-#include <vantage/kernel/task.h>
+#include <vantage/kernel/process.h>
 #include <vantage/platform/pi4/storage.h>
 #include <vantage/platform/pi4/io.h>
 #include <vantage/platform/pi4/drivers.h>
@@ -13,17 +13,9 @@
 #endif
 
 extern unsigned char _end[];
-void user_task(void);
-void enter_user_space(void (*func)(void), void* stack_top);
+/* The built-in terminal program, linked separately for its user addresses. */
+extern const unsigned char terminal_image[], terminal_image_end[];
 unsigned int secondary_core_start(unsigned int core_id);
-
-static unsigned char user_stack[4096]
-    __attribute__((section(".user.bss"), aligned(16)));
-
-static void user_entry(void* argument) {
-    (void)argument;
-    enter_user_space(user_task, &user_stack[sizeof(user_stack)]);
-}
 
 void main(uintptr_t dtb) {
     uart_init();
@@ -74,9 +66,11 @@ void main(uintptr_t dtb) {
 
     uart_writeText("\n[OK] Vantage booted!...\n");
 
-    TaskId app = task_create(user_entry, NULL);
-    if (!app || task_run() != TASK_OK || task_reap(app, NULL) != TASK_OK)
+    /* Pinned to core 0, which owns the display, input and file services. */
+    ProcessId app = process_create(terminal_image, (size_t)(terminal_image_end - terminal_image), TASK_CORE0);
+    if (!app || task_run() != TASK_OK || process_reap(app, NULL) != TASK_OK)
         mm_halt("[ERR] Application scheduling failed; boot halted\n");
+    uart_writeText("[INFO] Application process exited\n");
 
     for (;;) __asm__ volatile("wfe");
 }

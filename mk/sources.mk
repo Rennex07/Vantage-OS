@@ -1,6 +1,7 @@
 # Explicit production manifest: adding a source file does not silently link it.
 # Legacy examples and host test doubles must never enter the kernel image.
 ARCH_C_SOURCES := \
+    arch/armv8/address_space.c \
     arch/armv8/irq.c \
     arch/armv8/mmu.c \
     arch/armv8/mmu_tables.c \
@@ -29,6 +30,7 @@ FILESYSTEM_SOURCES := \
 
 SCHEDULER_SOURCES := \
     kernel/parallel/worker.c \
+    kernel/sched/process.c \
     kernel/sched/self_test.c \
     kernel/sched/task.c
 
@@ -59,12 +61,16 @@ PLATFORM_SOURCES := \
     platform/pi4/storage.c \
     platform/pi4/timer.c
 
+# The terminal is a separate EL0 program: linked on its own at user addresses
+# and embedded into the kernel as a flat image, never linked against it.
 USER_SOURCES := \
     user/apps/terminal/app.c \
     user/apps/terminal/terminal.c \
     user/lib/user_lib.c
+USER_ASM_SOURCES := \
+    user/lib/start.s
 
 C_SOURCES := $(sort $(ARCH_C_SOURCES) $(MEMORY_SOURCES) $(FILESYSTEM_SOURCES) \
     $(SCHEDULER_SOURCES) $(UI_SOURCES) $(DRIVER_SOURCES) $(PLATFORM_SOURCES) \
-    $(USER_SOURCES) kernel/boot/main.c kernel/syscall/dispatch.c lib/memory.c)
-S_SOURCES := $(ARCH_ASM_SOURCES)
+    kernel/boot/main.c kernel/syscall/dispatch.c lib/memory.c)
+S_SOURCES := $(ARCH_ASM_SOURCES) kernel/boot/terminal_image.s

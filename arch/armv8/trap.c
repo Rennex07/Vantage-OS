@@ -1,5 +1,6 @@
 #include <vantage/arch/trap.h>
 #include <vantage/arch/irq.h>
+#include <vantage/kernel/process.h>
 #include <vantage/kernel/syscall.h>
 #include <vantage/kernel/task_port.h>
 
@@ -11,16 +12,26 @@ typedef char frame_fpcr_must_match[(__builtin_offsetof(TrapFrame, fpcr) == 272) 
 typedef char frame_v_must_match[(__builtin_offsetof(TrapFrame, v) == 288) ? 1 : -1];
 
 #define SYNDROME_CLASS_SHIFT 26
+#define CLASS_UNKNOWN 0x00U
+#define CLASS_SYSTEM_REGISTER 0x18U
 #define CLASS_SVC64 0x15U
+#define CLASS_INSTRUCTION_ABORT_EL0 0x20U
+#define CLASS_DATA_ABORT_EL0 0x24U
 
 void trap_sync_el0(TrapFrame* frame) {
     uint64_t syndrome;
     __asm__ volatile("mrs %0, esr_el1" : "=r"(syndrome));
-    if (((syndrome >> SYNDROME_CLASS_SHIFT) & 0x3fU) == CLASS_SVC64) {
+    unsigned int class = (unsigned int)((syndrome >> SYNDROME_CLASS_SHIFT) & 0x3fU);
+    if (class == CLASS_SVC64) {
         frame->x[0] = handle_sys_call(frame->x[8], frame->x[0]);
         return;
     }
-    task_port_halt("[ERR] Unhandled EL0 exception; halted\n");
+    /* Any other synchronous exception ends the offending process only. */
+    process_fault(class == CLASS_DATA_ABORT_EL0 ? PROCESS_FAULT_DATA :
+                  class == CLASS_INSTRUCTION_ABORT_EL0 ? PROCESS_FAULT_INSTRUCTION :
+                  class == CLASS_UNKNOWN || class == CLASS_SYSTEM_REGISTER ? PROCESS_FAULT_UNDEFINED :
+                  PROCESS_FAULT_OTHER);
+    task_port_halt("[ERR] EL0 exception outside a process; halted\n");
 }
 
 void trap_irq(TrapFrame* frame) {

@@ -28,13 +28,14 @@ class Image:
         self.sections = [struct.unpack_from('<IIQQQQIIQQ', self.data, offset + i * size) for i in range(count)]
         names = self.section_bytes(self.sections[names_index])
         self.named = {self.string(names, s[0]): s for s in self.sections}
-        self.symbols = {}
+        self.symbols, self.sizes = {}, {}
         for section in self.sections:
             if section[1] == 2:
                 strings = self.section_bytes(self.sections[section[6]])
                 for pos in range(section[4], section[4] + section[5], section[9]):
-                    name, _, _, _, value, _ = struct.unpack_from('<IBBHQQ', self.data, pos)
+                    name, _, _, _, value, size = struct.unpack_from('<IBBHQQ', self.data, pos)
                     self.symbols[self.string(strings, name)] = value
+                    self.sizes[self.string(strings, name)] = size
 
     @staticmethod
     def string(data, offset):
@@ -300,7 +301,8 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(entries[0x8000000 // 0x200000], 0)
         self.assertEqual((entries[FRAMEBUFFER // 0x200000] >> 2) & 7, 2)
         self.assertEqual(entries[0xfc000000 // 0x200000] & 3, 1)
-        self.assertEqual(entries[0] & (3 << 6), 3 << 6)
+        self.assertEqual(entries[0] & (3 << 6), 2 << 6)   # Kernel text: EL1 read-only.
+        self.assertFalse(any(entry & 1 and entry & (1 << 6) for entry in entries), 'EL0-accessible kernel block')
         gate = self.image.symbols['__smp_boot_start']
         self.assertEqual((entries[gate // 0x200000] >> 2) & 7, 0)
         self.assertEqual((entries[gate // 0x200000] >> 6) & 3, 0)
@@ -453,7 +455,6 @@ class MemoryTests(unittest.TestCase):
         for level in (4, 8):
             for address in (self.image.symbols['__boot_stack_bottom'], start,
                             self.image.symbols['__kernel_stack_top'] - 256,
-                            self.image.symbols['__user_start'],
                             self.image.symbols['__smp_boot_start'], end - 16):
                 with self.subTest(level=level, address=hex(address)):
                     self.rejected_boot(address, fixture(), level=level)
@@ -463,7 +464,6 @@ class MemoryTests(unittest.TestCase):
         for level in (4, 8):
             for cells in (1, 2):
                 for address in (start, self.image.symbols['__kernel_stack_top'] - 128,
-                                self.image.symbols['__user_start'],
                                 self.image.symbols['__smp_boot_start'], end - 64):
                     with self.subTest(level=level, cells=cells, address=hex(address)):
                         self.rejected_boot(data=fixture(initrd=(address, address + 64),

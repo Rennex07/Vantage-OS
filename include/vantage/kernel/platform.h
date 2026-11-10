@@ -13,10 +13,10 @@ void fb_swap(void);
 
 uint32_t time_us(void);
 
-/* Validate a complete user buffer before a syscall dereferences it. */
-uint32_t user_buffer_valid(uintptr_t buffer, size_t size);
-
 #ifdef VANTAGE_SIM
+/* Host backends have one address space: bounds for a syscall buffer. The Pi
+ * resolves buffers through the calling process; see kernel/user_access.h. */
+uint32_t user_buffer_valid(uintptr_t buffer, size_t size);
 /* Host backend accounting; not part of the userspace ABI. */
 uint64_t sim_backbuffer_bytes(void);
 #endif

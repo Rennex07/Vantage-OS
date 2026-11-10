@@ -1,15 +1,15 @@
-"""Execute the linked cooperative scheduler and context switch on mocked ARM.
+"""Execute the linked scheduler and context switch for kernel tasks on mocked ARM.
 
 Usage: python tests/arm/tasks.py path/to/fresh/kernel8.elf -v
-Uses the memory harness dependencies. Probe bodies and exception delivery are
-scripted; scheduler C, stack switching, syscall entry and SVC wrappers execute.
-This is not a Pi, interrupt, cache-coherency or address-space-isolation test.
+Uses the memory harness dependencies. Probe bodies are scripted kernel tasks;
+scheduler C and stack switching execute. EL0 processes, system calls from user
+mode, interrupts and address-space isolation are tested on the CPU model in
+processes.py, preemption.py and interrupts.py. This is not a Pi test.
 """
 import struct
 import sys
 import unittest
 
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 from unicorn import UC_HOOK_CODE
 from unicorn import arm64_const as regs
 
@@ -17,8 +17,6 @@ from memory_management import Image, Machine, RETURN, STATS
 
 PROBE = 0x7000000
 RESUME = PROBE + 0x100
-USER = PROBE + 0x200
-USER_RESUME = PROBE + 0x300
 OK, INVALID, PENDING, BUSY, DEADLOCK = 1, 0, -1, -2, -3
 
 
@@ -31,53 +29,28 @@ class SchedulerMachine(Machine):
         self.system = {'fpcr': 0, 'fpsr': 0, 'elr_el1': 0, 'spsr_el1': 0, 'sp_el0': 0}
         super().__init__(image)
         self.programs, self.events = {}, []
-        self.kernel_sp = None
         self.uc.hook_add(UC_HOOK_CODE, self.halted,
                          begin=image.symbols['task_port_halt'], end=image.symbols['task_port_halt'])
-        for address, callback in ((PROBE, self.probe), (RESUME, self.resume),
-                                  (USER, self.user), (USER_RESUME, self.user_resume)):
+        for address, callback in ((PROBE, self.probe), (RESUME, self.resume)):
             self.uc.hook_add(UC_HOOK_CODE, callback, begin=address, end=address)
-        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
-        decoder.skipdata = True
-        text = image.named['.text']
-        for ins in decoder.disasm(image.section_bytes(text), text[3]):
-            if ins.mnemonic == 'svc':
-                self.uc.hook_add(UC_HOOK_CODE, self.svc, begin=ins.address, end=ins.address)
 
     def privileged(self, uc, address, size, instruction):
         mnemonic, operands = instruction
         parts = operands.lower().split(', ')
-        if mnemonic == 'mrs' and parts[1] == 'esr_el1':
-            uc.reg_write(getattr(regs, 'UC_ARM64_REG_' + parts[0].upper()), 0x15 << 26)
-        elif mnemonic == 'mrs' and parts[1] in self.system:
+        if mnemonic == 'mrs' and parts[1] in self.system:
             uc.reg_write(getattr(regs, 'UC_ARM64_REG_' + parts[0].upper()), self.system[parts[1]])
         elif mnemonic == 'msr' and parts[0] in self.system:
             self.system[parts[0]] = uc.reg_read(getattr(regs, 'UC_ARM64_REG_' + parts[1].upper()))
-        elif mnemonic == 'eret':
-            self.kernel_sp = uc.reg_read(regs.UC_ARM64_REG_SP)
-            self.level = 0
-            self.daif = self.system['spsr_el1'] & 0x3c0
-            uc.reg_write(regs.UC_ARM64_REG_SP, self.system['sp_el0'])
-            uc.reg_write(regs.UC_ARM64_REG_PC, self.system['elr_el1'])
-            return
         else:
             return super().privileged(uc, address, size, instruction)
         uc.reg_write(regs.UC_ARM64_REG_PC, address + size)
 
-    def svc(self, uc, address, size, _):
-        assert self.level == 0 and self.kernel_sp is not None
-        self.system.update(elr_el1=address + size, spsr_el1=self.daif,
-                           sp_el0=uc.reg_read(regs.UC_ARM64_REG_SP))
-        self.level, self.daif = 4, 0x3c0
-        uc.reg_write(regs.UC_ARM64_REG_SP, self.kernel_sp)
-        uc.reg_write(regs.UC_ARM64_REG_PC, self.image.symbols['el0_sync_exception'])
-
     def start(self):
         assert self.call('task_init') == OK
 
-    def create(self, steps, user=False, affinity=None):
+    def create(self, steps, affinity=None):
         key = len(self.programs) + 1
-        program = {'steps': list(steps), 'key': key, 'user': user, 'results': [], 'started': False}
+        program = {'steps': list(steps), 'key': key, 'results': [], 'started': False}
         self.programs[key] = program
         program['id'] = (self.call('task_create', PROBE, key) if affinity is None else
                          self.call('task_create_affinity', PROBE, key, affinity))
@@ -103,13 +76,7 @@ class SchedulerMachine(Machine):
         self.system.update(fpcr=program['key'] << 22, fpsr=program['key'],
                            elr_el1=program['key'] * 0x1000, spsr_el1=program['key'],
                            sp_el0=program['key'] * 0x2000)
-        if program['user']:
-            program['user_top'] = self.image.symbols['user_stack'] + 4096
-            uc.reg_write(regs.UC_ARM64_REG_X0, USER)
-            uc.reg_write(regs.UC_ARM64_REG_X1, program['user_top'])
-            uc.reg_write(regs.UC_ARM64_REG_PC, self.image.symbols['enter_user_space'])
-        else:
-            self.step(program)
+        self.step(program)
 
     def check_registers(self, program):
         for i in range(19, 30):
@@ -128,18 +95,6 @@ class SchedulerMachine(Machine):
         program['results'].append(signed(uc.reg_read(regs.UC_ARM64_REG_X0)))
         self.step(program)
 
-    def user(self, uc, address, size, _):
-        program = self.running()
-        program['return'] = uc.reg_read(regs.UC_ARM64_REG_X30)
-        self.step(program)
-
-    def user_resume(self, uc, address, size, _):
-        program = self.running()
-        self.check_registers(program)
-        assert self.level == 0
-        program['results'].append(signed(uc.reg_read(regs.UC_ARM64_REG_X0)))
-        self.step(program)
-
     def step(self, program):
         name, arguments = program['steps'].pop(0) if program['steps'] else ('return', ())
         arguments = [argument() if callable(argument) else argument for argument in arguments]
@@ -150,7 +105,7 @@ class SchedulerMachine(Machine):
             return
         for i, value in enumerate(arguments):
             self.uc.reg_write(getattr(regs, f'UC_ARM64_REG_X{i}'), value & 0xffffffffffffffff)
-        self.uc.reg_write(regs.UC_ARM64_REG_X30, USER_RESUME if program['user'] else RESUME)
+        self.uc.reg_write(regs.UC_ARM64_REG_X30, RESUME)
         self.uc.reg_write(regs.UC_ARM64_REG_PC, self.image.symbols[name])
 
 
@@ -166,21 +121,6 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.m.call('task_self_test'), OK)
         self.assertEqual(self.m.call('task_init'), INVALID)
         self.assertEqual(self.m.call('task_run'), OK)
-
-    def test_terminal_frame_wait_yields_even_without_a_redraw(self):
-        def device_return(uc, address, size, _):
-            uc.reg_write(regs.UC_ARM64_REG_X0, 0)
-            uc.reg_write(regs.UC_ARM64_REG_PC, uc.reg_read(regs.UC_ARM64_REG_X30))
-
-        for name in ('fb_wait_frame', 'pi4_drivers_poll'):
-            address = self.image.symbols[name]
-            self.m.uc.hook_add(UC_HOOK_CODE, device_return, begin=address, end=address)
-        app = self.m.create([('sys_frame_wait', ()), ('sys_task_exit', (0,))], user=True)
-        peer = self.m.create([('task_exit', (0,))])
-        self.assertEqual(self.m.call('task_run'), OK)
-        self.assertEqual(self.m.events, [(app['key'], 'sys_frame_wait'),
-                                        (peer['key'], 'task_exit'),
-                                        (app['key'], 'sys_task_exit')])
 
     def test_round_robin_and_actual_stack_register_switching(self):
         a = self.m.create([('task_yield', ())] * 4 + [('task_exit', (31,))])
@@ -278,23 +218,6 @@ class TaskTests(unittest.TestCase):
     def test_unavailable_and_invalid_affinity_is_rejected(self):
         for mask in (0, 2, 15, 16, 0xffffffff):
             self.assertEqual(self.m.call('task_create_affinity', PROBE, 1, mask), 0)
-
-    def test_el0_svc_yield_exit_preserves_exception_return(self):
-        user = self.m.create([('sys_task_id', ()), ('sys_task_yield', ()),
-                              ('sys_task_id', ()), ('sys_task_exit', (-17,))], user=True)
-        peer = self.m.create([('task_yield', ())] * 3)
-        self.assertEqual(self.m.call('task_run'), OK)
-        self.assertEqual(user['results'], [user['id'], OK, user['id']])
-        self.assertEqual(self.m.call('task_reap', user['id'], STATS), OK)
-        self.assertEqual(struct.unpack('<i', self.m.uc.mem_read(STATS, 4))[0], -17)
-        self.assertEqual(self.m.call('task_reap', peer['id'], 0), OK)
-
-    def test_returning_el0_app_exits_via_svc(self):
-        user = self.m.create([('sys_task_yield', ())], user=True)
-        self.assertEqual(self.m.call('task_run'), OK)
-        self.assertEqual(user['results'], [OK])
-        self.assertEqual(self.m.call('task_reap', user['id'], STATS), OK)
-        self.assertEqual(struct.unpack('<i', self.m.uc.mem_read(STATS, 4))[0], 0)
 
     def test_unknown_and_unavailable_syscalls(self):
         for id in (0, 6, 15, 16, 17, 18, 19, 0xffffffffffffffff):

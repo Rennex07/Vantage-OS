@@ -14,15 +14,17 @@ OPS = 0x7300000
 CALLBACK = 0x7310000
 
 
-class FileMachine(SchedulerMachine):
-    def __init__(self, image, disk=None):
-        super().__init__(image)
+class Disk:
+    """Mixin: a modeled sector device the kernel reaches through code hooks."""
+    ops, callback = OPS, CALLBACK
+
+    def attach_disk(self, disk=None):
         self.disk = bytearray(new_image() if disk is None else disk)
-        self.uc.mem_write(OPS, struct.pack('<5Q', 0, len(self.disk) // 512,
-                                         CALLBACK, CALLBACK + 4, CALLBACK + 8))
+        self.uc.mem_write(self.ops, struct.pack('<5Q', 0, len(self.disk) // 512,
+                                              self.callback, self.callback + 4, self.callback + 8))
         for i in range(3):
             self.uc.hook_add(UC_HOOK_CODE, self.sector, user_data=i,
-                             begin=CALLBACK + i * 4, end=CALLBACK + i * 4)
+                             begin=self.callback + i * 4, end=self.callback + i * 4)
 
     def sector(self, uc, address, size, operation):
         if operation != 2:
@@ -37,4 +39,10 @@ class FileMachine(SchedulerMachine):
         uc.reg_write(regs.UC_ARM64_REG_PC, uc.reg_read(regs.UC_ARM64_REG_X30))
 
     def mount_files(self):
-        return self.call('files_mount', OPS, 0)
+        return self.call('files_mount', self.ops, 0)
+
+
+class FileMachine(Disk, SchedulerMachine):
+    def __init__(self, image, disk=None):
+        super().__init__(image)
+        self.attach_disk(disk)

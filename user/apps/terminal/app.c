@@ -1,20 +1,14 @@
 #include "terminal.h"
 #include <vantage/user.h>
 
-#ifdef VANTAGE_SIM
-#define USER_DATA
-#else
-#define USER_DATA __attribute__((section(".user.bss"), aligned(16)))
-#endif
-
-static Terminal terminal USER_DATA;
-static uint32_t keyboard_columns USER_DATA;
-static uint32_t keyboard_top USER_DATA;
-static uint32_t keyboard_shift USER_DATA;
-static uint32_t keyboard_dirty USER_DATA;
-static uint32_t keyboard_pressed USER_DATA;
-static uint32_t keyboard_repeat_time USER_DATA;
-static uint32_t keyboard_repeat_delay USER_DATA;
+static Terminal terminal;
+static uint32_t keyboard_columns;
+static uint32_t keyboard_top;
+static uint32_t keyboard_shift;
+static uint32_t keyboard_dirty;
+static uint32_t keyboard_pressed;
+static uint32_t keyboard_repeat_time;
+static uint32_t keyboard_repeat_delay;
 
 #define KEYBOARD_ROWS 17U
 #define KEYBOARD_KEYS 43U

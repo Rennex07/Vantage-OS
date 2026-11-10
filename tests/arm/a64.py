@@ -45,6 +45,7 @@ class Program:
     def add(self, rd, rn, immediate): return self.emit(0x91000000 | (immediate << 10) | (rn << 5) | rd)
     def sub(self, rd, rn, immediate): return self.emit(0xd1000000 | (immediate << 10) | (rn << 5) | rd)
     def add_reg(self, rd, rn, rm): return self.emit(0x8b000000 | (rm << 16) | (rn << 5) | rd)
+    def sub_reg(self, rd, rn, rm): return self.emit(0xcb000000 | (rm << 16) | (rn << 5) | rd)
     def cmp(self, rn, immediate): return self.emit(0xf100001f | (immediate << 10) | (rn << 5))
     def ldr(self, rt, rn, offset=0): return self.emit(0xf9400000 | ((offset // 8) << 10) | (rn << 5) | rt)
     def str(self, rt, rn, offset=0): return self.emit(0xf9000000 | ((offset // 8) << 10) | (rn << 5) | rt)

@@ -163,7 +163,7 @@ class StartupTests(unittest.TestCase):
             top = IMAGE.symbols[f"__core{core}_stack_top"]
             self.assertEqual(top - previous, 4096)
             self.assertEqual(top % 16, 0)
-            self.assertLessEqual(top, IMAGE.symbols["__user_start"])
+            self.assertLessEqual(top, IMAGE.symbols["__smp_boot_start"])
             previous = top
         flags = IMAGE.symbols["secondary_ready"]
         self.assertEqual(flags % 64, 0)
@@ -171,7 +171,6 @@ class StartupTests(unittest.TestCase):
         self.assertLessEqual(flags + 256, IMAGE.symbols["__kernel_stack_top"] - 0x4000)
         gate = IMAGE.symbols["secondary_mmu_ready"]
         self.assertEqual(IMAGE.symbols["__smp_boot_start"] % 0x200000, 0)
-        self.assertLessEqual(IMAGE.symbols["__user_end"], IMAGE.symbols["__smp_boot_start"])
         self.assertGreaterEqual(gate, IMAGE.symbols["__smp_boot_start"])
         self.assertLess(gate, IMAGE.symbols["__smp_boot_end"])
         self.assertEqual(IMAGE.sizes["workers"], 4 * 64)

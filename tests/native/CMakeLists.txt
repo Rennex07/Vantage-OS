@@ -82,10 +82,14 @@ foreach(name pages allocators fdt)
   target_link_libraries(mm_${name}_test PRIVATE mm_test_core)
 endforeach()
 
+set(SCHEDULER_SOURCES "${ROOT}/kernel/sched/task.c" "${ROOT}/kernel/sched/process.c"
+  "${ROOT}/kernel/parallel/worker.c" "${ROOT}/arch/armv8/address_space.c")
 vantage_native_test(task_smp_test scheduler_four_core scheduler
-  sched/task_smp.c "${ROOT}/kernel/sched/task.c" "${ROOT}/kernel/sched/self_test.c"
-  "${ROOT}/kernel/parallel/worker.c")
+  sched/task_smp.c "${ROOT}/kernel/sched/self_test.c" ${SCHEDULER_SOURCES})
 target_link_libraries(task_smp_test PRIVATE Threads::Threads)
+vantage_native_test(process_test scheduler_processes scheduler
+  sched/process.c ${SCHEDULER_SOURCES})
+target_link_libraries(process_test PRIVATE Threads::Threads)
 
 vantage_native_test(terminal_test terminal_model user
   user/terminal.c "${ROOT}/user/lib/user_lib.c" "${ROOT}/user/apps/terminal/terminal.c")

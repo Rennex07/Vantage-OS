@@ -67,7 +67,7 @@ int main(void) {
     struct circle_args* args = (struct circle_args*)user_words;
     unsigned int g, i;
 
-    mmu_populate_tables(level1, level2, 0x3e000000, 0x400000, 0x400000, 0x600000, 0x600000);
+    mmu_populate_tables(level1, level2, 0x3e000000, 0x400000, 0x600000);
     for (g = 0; g < 4; g++) {
         if (level1[g] != ((uint64_t)(uintptr_t)level2[g] | 3)) return 1;
         for (i = 0; i < 512; i++) {
@@ -77,16 +77,20 @@ int main(void) {
                 continue;
             }
             unsigned int ap = (unsigned int)((level2[g][i] >> 6) & 3);
-            unsigned int expected = g == 0 && i == 0 ? 3 : g == 0 && i == 2 ? 1 : 0;
-            if (ap != expected) return 1;
+            /* No block is accessible or executable from EL0; kernel text is
+             * read-only and the only block executable at EL1. */
+            unsigned int expected = g == 0 && i == 0 ? 2 : 0;
+            if (ap != expected || (ap & 1)) return 1;
+            if (!(level2[g][i] & (1ULL << 54))) return 1;
+            if (!(level2[g][i] & (1ULL << 53)) != (g == 0 && i == 0)) return 1;
+            if (level2[g][i] & (1ULL << 11)) return 1;
             if (g == 0 && i == 3 &&
                 (((level2[g][i] >> 2) & 7) != 0 || ((level2[g][i] >> 8) & 3) != 2)) return 1;
-            if ((g || i) && !(level2[g][i] & (1ULL << 54))) return 1;
         }
     }
-    /* Even overlapping caller ranges cannot make the transition gate user RW
-     * or framebuffer Normal memory. Its reserved Device mapping takes priority. */
-    mmu_populate_tables(level1, level2, 0x600000, 0x200000, 0x600000, 0x800000, 0x600000);
+    /* Even an overlapping framebuffer range cannot make the transition gate
+     * Normal memory. Its reserved Device mapping takes priority. */
+    mmu_populate_tables(level1, level2, 0x600000, 0x200000, 0x600000);
     if (((level2[0][3] >> 2) & 7) || ((level2[0][3] >> 6) & 3)) return 1;
     if (!user_region_contains(start, end, start, sizeof(user_words)) ||
         user_region_contains(start, end, start - 1, 1) ||
@@ -132,6 +136,6 @@ int main(void) {
         if (handle_sys_call(10, start) != 3) return 1;
         if (handle_sys_call(12, 0) != 123456) return 1;
     }
-    puts("PASS: kernel mappings, user stack region, buffer boundaries and syscall pointer checks");
+    puts("PASS: privileged-only kernel mappings, buffer boundaries and syscall pointer checks");
     return 0;
 }

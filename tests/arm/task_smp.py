@@ -1,8 +1,9 @@
 """Interleave four CPU contexts over shared modeled RAM and linked ARM code.
 
-The production scheduler, lock and register-switch assembly execute. CPU/device
-state and execution quanta are modeled; this is not physical cache-coherence,
-interrupt or performance validation.
+The production scheduler, lock and register-switch assembly execute for kernel
+tasks. CPU/device state and execution quanta are modeled; this is not physical
+cache-coherence, interrupt or performance validation. EL0 processes and timer
+preemption on four CPUs are covered by processes.py and preemption.py.
 """
 import struct
 import sys
@@ -38,6 +39,8 @@ class MulticoreMachine(SchedulerMachine):
             if ins.mnemonic in ('ldaxr', 'stxr'):
                 self.uc.hook_add(UC_HOOK_CODE, self.exclusive,
                                  user_data=(ins.mnemonic, ins.op_str), begin=ins.address, end=ins.address)
+            elif ins.mnemonic == 'wfe':
+                self.uc.hook_add(UC_HOOK_CODE, self.wait, begin=ins.address, end=ins.address)
         self.uc.hook_add(UC_HOOK_CODE, self.worker_return,
                          begin=WORKER_RETURN, end=WORKER_RETURN)
         self.uc.hook_add(UC_HOOK_CODE, self.quantum)
@@ -55,6 +58,12 @@ class MulticoreMachine(SchedulerMachine):
                 uc.emu_stop()
             else:
                 self.budget -= 1
+
+    def wait(self, uc, address, size, _):
+        # An idle CPU sleeps until the next round instead of spinning through
+        # its quantum; an unfair spin lock would otherwise starve busy CPUs.
+        uc.reg_write(regs.UC_ARM64_REG_PC, address + size)
+        uc.emu_stop()
 
     def step(self, program):
         self.trace.append((self.core, program['key']))
@@ -202,15 +211,6 @@ class MulticoreTests(unittest.TestCase):
         # No EMMC2 registers are mapped: accidentally touching MMIO fails too.
         self.assertEqual(self.m.run_smp(), OK)
         self.assertEqual(program['results'], [0, -3, -7])
-
-    def test_el0_yield_and_exit_can_migrate_with_pending_exception_frame(self):
-        user = self.m.create([('sys_task_id', ()), ('sys_task_yield', ())] * 16 +
-                             [('sys_task_exit', (-17,))], user=True, affinity=15)
-        for _ in range(4): self.m.create([('task_yield', ())] * 24, affinity=15)
-        self.assertEqual(self.m.run_smp(quantum=503), OK)
-        self.assertEqual(user['results'], [user['id'], OK] * 16)
-        self.assertEqual(self.m.call('task_reap', user['id'], STATS), OK)
-        self.assertEqual(struct.unpack('<i', self.m.uc.mem_read(STATS, 4))[0], -17)
 
 
 if __name__ == '__main__':

@@ -24,12 +24,20 @@ RETURN = LOW
 WORKER_RETURN = LOW + 0x40
 KERNEL_CODE = 0x20000
 SCRATCH = 0x7c00000
+STATUS = 0x7bff000
 
 GIC_DISTRIBUTOR, GIC_CPU = 0xff841000, 0xff842000
 GICD_CTLR, GICD_ISENABLER0, GICD_IPRIORITYR = GIC_DISTRIBUTOR, GIC_DISTRIBUTOR + 0x100, GIC_DISTRIBUTOR + 0x400
 GICC_CTLR, GICC_PMR, GICC_IAR, GICC_EOIR = GIC_CPU, GIC_CPU + 4, GIC_CPU + 0xc, GIC_CPU + 0x10
 TIMER_IRQ, SPURIOUS = 27, 1023
 COUNTER_HZ = 54000000
+
+USER_BASE, USER_END, PAGE = 0x100000000, 0x140000000, 4096
+IMAGE_MAGIC = 0x31676d4945544e56
+HEADER_BYTES = 48
+PROGRAM_BASE = USER_BASE + HEADER_BYTES
+FAULT_DATA, FAULT_INSTRUCTION, FAULT_UNDEFINED, FAULT_ADDRESS, FAULT_OTHER = -1001, -1002, -1003, -1004, -1005
+OK, INVALID, PENDING = 1, 0, -1
 
 EXCP_UDEF, EXCP_SWI, EXCP_PREFETCH_ABORT, EXCP_DATA_ABORT = 1, 2, 3, 4
 EL1H_MASKED = 0x3c5
@@ -38,6 +46,24 @@ IRQ_MASK = 0x80
 SCR_EL3, HCR_EL2, SCTLR_EL1 = (1, 1, 3, 6, 0), (1, 1, 3, 4, 0), (1, 0, 3, 0, 0)
 X = [getattr(regs, f'UC_ARM64_REG_X{i}') for i in range(29)] + [regs.UC_ARM64_REG_X29, regs.UC_ARM64_REG_X30]
 V = [getattr(regs, f'UC_ARM64_REG_V{i}') for i in range(32)]
+
+
+def signed(value):
+    return (value & 0xffffffff) - ((value & 0x80000000) << 1)
+
+
+def image(text, rodata=b'', data=b'', bss=0, entry=PROGRAM_BASE):
+    """Flat program image: text is assembled for PROGRAM_BASE."""
+    pad = lambda blob: blob + bytes(-len(blob) % PAGE)
+    text = pad(bytes(HEADER_BYTES) + text)
+    rodata = pad(rodata)
+    header = struct.pack('<6Q', IMAGE_MAGIC, entry, len(text), len(rodata), len(data), bss)
+    return header + text[HEADER_BYTES:] + rodata + data
+
+
+def data_base(text, rodata=b''):
+    """Address of the writable data of an image built from these parts."""
+    return USER_BASE + len(text) + HEADER_BYTES + (-(len(text) + HEADER_BYTES) % PAGE) + len(rodata) + (-len(rodata) % PAGE)
 
 
 def register(name):
@@ -70,10 +96,12 @@ class CpuMachine(Machine):
         self.slice_instructions = slice_instructions
         self.exception = None
         self.last_stop = None
+        self.stale_code = False
         self.entries = []          # (core, kind, origin EL, interrupted PC)
         self.gic_writes = []       # (core, register, value)
         self.completed = []        # (core, EOIR value)
         self.maintenance = []      # (core, mnemonic, operand, register value)
+        self.syscalls = []         # (core, ASID of the caller, number, argument)
         self.gic_group0 = False
         self.clock_us = 0
         self.lock_version = 0
@@ -87,6 +115,8 @@ class CpuMachine(Machine):
         uc.hook_add(UC_HOOK_CODE, self.worker_return, begin=WORKER_RETURN, end=WORKER_RETURN)
         lock = image.symbols['scheduler_lock']
         uc.hook_add(UC_HOOK_MEM_WRITE, self.lock_write, begin=lock, end=lock + 3)
+        uc.hook_add(UC_HOOK_CODE, self.syscall, begin=image.symbols['handle_sys_call'],
+                    end=image.symbols['handle_sys_call'])
         for name in ('task_port_halt', 'parallel_port_halt'):
             uc.hook_add(UC_HOOK_CODE, self.halted, begin=image.symbols[name], end=image.symbols[name])
         scanner = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
@@ -159,6 +189,10 @@ class CpuMachine(Machine):
         return values
 
     # --- Modeled devices and instructions ---------------------------------
+    def syscall(self, uc, address, size, _):
+        asid = uc.reg_read(regs.UC_ARM64_REG_TTBR0_EL1) >> 48
+        self.syscalls.append((self.core, asid, uc.reg_read(X[0]), uc.reg_read(X[1])))
+
     def halted(self, uc, address, size, _):
         pointer = uc.reg_read(regs.UC_ARM64_REG_X0)
         text = bytes(uc.mem_read(pointer, 96)).split(b'\0')[0].decode('ascii', 'replace').strip()
@@ -180,8 +214,14 @@ class CpuMachine(Machine):
             cpu.armed = value & 3 == 1
             cpu.remaining = self.slice_instructions
             cpu.timer_log.append(('start' if cpu.armed else 'stop', value))
+        elif mnemonic == 'ic':
+            # Like an instruction cache, Unicorn keeps executing code it has
+            # already translated until the kernel invalidates it.
+            self.maintenance.append((self.core, mnemonic, parts[0], None))
+            self.stale_code = True
+            uc.emu_stop()
         else:
-            if mnemonic in ('tlbi', 'ic', 'dc'):
+            if mnemonic in ('tlbi', 'dc'):
                 value = uc.reg_read(register(parts[1])) if len(parts) > 1 else None
                 self.maintenance.append((self.core, mnemonic, parts[0], value))
             return  # Executed by the CPU model itself.
@@ -203,8 +243,13 @@ class CpuMachine(Machine):
         pointer = uc.reg_read(register(parts[-1].strip('[]')))
         assert pointer == self.image.symbols['scheduler_lock']
         if mnemonic == 'ldaxr':
-            uc.reg_write(register(parts[0]), struct.unpack('<I', uc.mem_read(pointer, 4))[0])
+            held = struct.unpack('<I', uc.mem_read(pointer, 4))[0]
+            uc.reg_write(register(parts[0]), held)
             self.reservations[self.core] = self.lock_version
+            if held:
+                # Let the modeled owner run instead of spinning out this quantum.
+                self.cpu.idle = True
+                uc.emu_stop()
         else:
             success = self.reservations[self.core] == self.lock_version
             if success:
@@ -242,6 +287,56 @@ class CpuMachine(Machine):
         uc.reg_write(regs.UC_ARM64_REG_X30, WORKER_RETURN)
         uc.reg_write(regs.UC_ARM64_REG_PC, self.image.symbols['parallel_worker_poll'])
 
+    def stub(self, name, callback=None, result=0):
+        """Replace a kernel function with a device model returning its result."""
+        def run(uc, address, size, _):
+            value = result
+            if callback is not None:
+                value = callback(*[uc.reg_read(X[i]) for i in range(4)])
+            uc.reg_write(regs.UC_ARM64_REG_X0, int(value or 0) & 0xffffffffffffffff)
+            uc.reg_write(regs.UC_ARM64_REG_PC, uc.reg_read(regs.UC_ARM64_REG_X30))
+        address = self.image.symbols[name]
+        self.uc.hook_add(UC_HOOK_CODE, run, begin=address, end=address)
+
+    # --- Processes --------------------------------------------------------
+    def create_process(self, blob, affinity=1):
+        # The kernel copies the image; the staging buffer is reusable.
+        self.uc.mem_write(SCRATCH, blob)
+        return self.call('process_create', SCRATCH, len(blob), affinity)
+
+    def process_field(self, process, offset, size=8):
+        slot = (process & 63) - 1
+        data = self.uc.mem_read(self.image.symbols['processes'] + slot * self.image.sizes['processes'] // 8 + offset, size)
+        return int.from_bytes(data, 'little')
+
+    def process_root(self, process):
+        return self.process_field(process, 40)
+
+    def translate(self, root, address):
+        """Independent walk of a process's tables: (physical address, descriptor)."""
+        word = lambda a: struct.unpack('<Q', self.uc.mem_read(a, 8))[0]
+        table = root & 0x0000fffffffff000
+        for shift in (30, 21, 12):
+            entry = word(table + ((address >> shift) & 511) * 8)
+            if not entry & 1 or (shift != 12 and entry & 3 != 3):
+                return None, entry
+            table = entry & 0x0000fffffffff000
+        return table + (address & 0xfff), entry
+
+    def user_read(self, process, address, size):
+        physical, _ = self.translate(self.process_root(process), address)
+        assert physical is not None, f'{address:#x} is not mapped'
+        return bytes(self.uc.mem_read(physical, size))
+
+    def reap(self, process):
+        """(result, status) of process_reap."""
+        result = signed(self.call('process_reap', process, STATUS))
+        return result, struct.unpack('<i', self.uc.mem_read(STATUS, 4))[0]
+
+    def free_pages(self):
+        assert self.call('mm_stats', STATUS + 64) == 1
+        return struct.unpack('<5Q', self.uc.mem_read(STATUS + 64, 40))[2]
+
     # --- Exception entry --------------------------------------------------
     def interrupt(self, uc, number, _):
         self.exception = number
@@ -249,7 +344,10 @@ class CpuMachine(Machine):
 
     def fault_address(self, pc):
         """Effective address of the faulting data access, from its operands."""
-        ins = next(self.decoder.disasm(bytes(self.uc.mem_read(pc, 4)), pc))
+        physical = pc
+        if pc >= USER_BASE:
+            physical, _ = self.translate(self.uc.reg_read(regs.UC_ARM64_REG_TTBR0_EL1), pc)
+        ins = next(self.decoder.disasm(bytes(self.uc.mem_read(physical, 4)), pc))
         for operand in ins.operands:
             if operand.type == ARM64_OP_MEM:
                 address = self.uc.reg_read(self.capstone_register(ins, operand.mem.base))
@@ -315,13 +413,17 @@ class CpuMachine(Machine):
     # --- Execution --------------------------------------------------------
     def chunk(self, budget):
         cpu = self.cpu
-        size = min(budget, 256)
+        # Short steps only matter while a timer interrupt may become deliverable.
+        size = min(budget, 256 if cpu.armed else 16384)
         if cpu.armed and cpu.remaining > 0:
             size = min(size, cpu.remaining)
         return size
 
-    def advance(self, budget, stop=RETURN):
-        """Run the current CPU for an instruction budget, entering exceptions."""
+    def advance(self, budget, stop=RETURN, counted=True):
+        """Run the current CPU for an instruction budget, entering exceptions.
+
+        Uncounted execution is much faster; it is used for single-CPU kernel
+        calls while no interrupt can become deliverable."""
         cpu = self.cpu
         cpu.idle = False
         if stop != self.last_stop:
@@ -334,13 +436,20 @@ class CpuMachine(Machine):
             self.exception = None
             pc = self.pc
             try:
-                self.uc.emu_start(pc, stop, count=count)
+                if counted or cpu.armed or cpu.forced_irq is not None:
+                    self.uc.emu_start(pc, stop, count=count)
+                else:
+                    self.uc.emu_start(pc, stop, timeout=120_000_000)
             except UcError as error:
                 if error.errno not in (UC_ERR_EXCEPTION, UC_ERR_INSN_INVALID):
-                    raise AssertionError(f'core {self.core}: {error} near {self.pc:#x}') from error
+                    raise AssertionError(f'core {self.core}: {error} near {self.pc:#x}, '
+                                         f'x30={self.uc.reg_read(X[30]):#x}') from error
                 self.exception = EXCP_UDEF
             if self.failure:
                 raise AssertionError(self.failure)
+            if self.stale_code:
+                self.uc.ctl_flush_tb()
+                self.stale_code = False
             budget -= count
             if cpu.armed:
                 cpu.remaining -= count
@@ -349,15 +458,27 @@ class CpuMachine(Machine):
         cpu.last_pc = self.pc
         return self.pc == stop
 
-    def call(self, name, *args, budget=400_000_000):
+    def interject(self, name, *args):
+        """Call a kernel function from an interrupted run, on a spare stack,
+        and resume the interrupted CPU state afterwards."""
+        saved, parked = self.uc.context_save(), self.cpu.idle
+        self.set_pstate(EL1H_MASKED)
+        try:
+            return self.call(name, *args, stack=SCRATCH + 0x200000)
+        finally:
+            self.uc.context_restore(saved)
+            self.uc._Uc__ctl_w(UC_CTL_TLB_FLUSH)
+            self.cpu.idle = parked
+
+    def call(self, name, *args, budget=400_000_000, stack=None):
         uc = self.uc
-        uc.reg_write(regs.UC_ARM64_REG_SP, self.stack_top())
+        uc.reg_write(regs.UC_ARM64_REG_SP, stack or self.stack_top())
         uc.reg_write(regs.UC_ARM64_REG_X30, RETURN)
         for i, value in enumerate(args):
             uc.reg_write(X[i], value & 0xffffffffffffffff)
         uc.reg_write(regs.UC_ARM64_REG_PC, self.image.symbols[name] if isinstance(name, str) else name)
         self.failure = None
-        while budget > 0 and not self.advance(min(budget, 1 << 20)):
+        while budget > 0 and not self.advance(min(budget, 1 << 20), counted=False):
             budget -= 1 << 20
         if self.pc != RETURN:
             raise AssertionError(f'{name} did not return: PC={self.pc:#x}')
