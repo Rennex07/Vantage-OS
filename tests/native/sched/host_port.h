@@ -201,7 +201,7 @@ void task_port_enter_user(uint64_t entry, uint64_t stack, uint64_t argument) {
 }
 
 /* Page allocator double: host pages stand in for physical pages. */
-static uint32_t pages_live, pages_refused, page_lock;
+static uint32_t pages_live, pages_refused;
 static int64_t page_budget = -1;
 uint64_t mm_alloc_pages(uint64_t count, uint64_t alignment_pages) {
     CHECK(count == 1 && alignment_pages == 1 && core_id == 0);
