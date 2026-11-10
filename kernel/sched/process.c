@@ -206,8 +206,8 @@ int process_kill(ProcessId id, int status) {
     sched_lock();
     Process* process = process_lookup(id);
     if (process && !process->terminating) {
-        process->terminating = 1;
         process->status = status;
+        parallel_store(&process->terminating, 1);
     }
     sched_unlock();
     if (process) parallel_wake();

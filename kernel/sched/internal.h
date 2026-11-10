@@ -19,8 +19,9 @@ typedef struct {
     enum TaskState state;
     int status;
     uint32_t affinity, core;
-    uint64_t dispatches;
+    uint64_t dispatches, preemptions;
     Process* process; /* NULL for kernel tasks; immutable while the slot is used. */
+    uint64_t stack_alignment;
     TASK_ALIGN unsigned char stack[TASK_STACK_BYTES];
 } Task;
 

@@ -38,6 +38,8 @@ int irq_init_core(void) {
                      : "=r"(core), "=r"(level), "=r"(mask));
     if (level != 4 || (mask & 0x3c0) != 0x3c0) return 0;
     irq_timer_stop();
+    /* EL0 must not be able to reprogram the timer that preempts it. */
+    __asm__ volatile("msr cntkctl_el1, xzr\nisb" ::: "memory");
     /* Non-secure view: bit 0 forwards Group 1. PPI state is banked per core. */
     if (!(core & 0xff)) write32(GICD_CTLR, read32(GICD_CTLR) | 1U);
     *(volatile uint8_t*)(GICD_IPRIORITYR + IRQ_TIMER) = TIMER_PRIORITY;

@@ -90,6 +90,15 @@ target_link_libraries(task_smp_test PRIVATE Threads::Threads)
 vantage_native_test(process_test scheduler_processes scheduler
   sched/process.c ${SCHEDULER_SOURCES})
 target_link_libraries(process_test PRIVATE Threads::Threads)
+vantage_native_test(preempt_test scheduler_preemption scheduler
+  sched/preempt.c "${ROOT}/kernel/sched/self_test.c" ${SCHEDULER_SOURCES})
+target_link_libraries(preempt_test PRIVATE Threads::Threads)
+if(MSVC)
+  # Tasks migrate between threads on fibers: never cache thread-local addresses.
+  foreach(target task_smp_test process_test preempt_test)
+    target_compile_options(${target} PRIVATE /GT)
+  endforeach()
+endif()
 
 vantage_native_test(terminal_test terminal_model user
   user/terminal.c "${ROOT}/user/lib/user_lib.c" "${ROOT}/user/apps/terminal/terminal.c")

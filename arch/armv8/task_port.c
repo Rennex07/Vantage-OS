@@ -1,4 +1,5 @@
 #include <vantage/kernel/task_port.h>
+#include <vantage/arch/irq.h>
 #include <vantage/arch/mmu.h>
 #include <vantage/arch/trap.h>
 #include <vantage/platform/pi4/io.h>
@@ -45,8 +46,14 @@ void task_port_address_space(uint64_t root) {
     mmu_install_space(root);
 }
 
-/* EL0t. Interrupts stay masked until the scheduler handles the timer tick. */
-#define USER_STATE 0x3c0ULL
+void task_port_slice_start(uint32_t microseconds) { irq_timer_start(microseconds); }
+void task_port_slice_stop(void) { irq_timer_stop(); }
+
+void task_port_irq_enable(void) { __asm__ volatile("msr daifclr, #2" ::: "memory"); }
+void task_port_irq_disable(void) { __asm__ volatile("msr daifset, #2" ::: "memory"); }
+
+/* EL0t with every exception unmasked: user code cannot hold off the tick. */
+#define USER_STATE 0ULL
 
 void task_port_enter_user(uint64_t entry, uint64_t stack, uint64_t argument) {
     /* Nothing of the kernel's register state may reach EL0. */

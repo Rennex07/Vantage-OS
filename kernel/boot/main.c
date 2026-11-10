@@ -47,6 +47,10 @@ void main(uintptr_t dtb) {
     if (!task_multicore_self_test())
         mm_halt("[ERR] Four-core task scheduling self-test failed; boot halted\n");
     uart_writeText("[OK] Tasks executed concurrently on cores 0, 1, 2 and 3\n");
+    /* Without working ticks a looping process would keep its core forever. */
+    if (!task_preemption_self_test())
+        mm_halt("[ERR] Timer preemption self-test failed; boot halted\n");
+    uart_writeText("[OK] Timer ticks preempted kernel tasks on cores 0, 1, 2 and 3\n");
 
 #if VANTAGE_STORAGE_VALIDATION
     /* Disposable validation image: mount a deliberately provisioned partition.

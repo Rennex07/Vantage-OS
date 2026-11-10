@@ -50,8 +50,45 @@ void parallel_store(uint32_t* value, uint32_t next) {
 }
 unsigned int parallel_core_id(void) { return core_id; }
 unsigned int task_port_core(void) { return core_id; }
-int task_port_owned(void) { return core_id < TASK_CORES; }
+
+/* Simulated tick. Each modeled core has a one-shot slice counted in
+ * interruptible points: host_user_point() stands for an EL0 instruction
+ * boundary and host_kernel_point() for one inside interrupt-enabled EL1 code.
+ * When the slice has run out, the point takes the interrupt: it masks, calls
+ * the scheduler's tick upcall and resumes, possibly on another core. */
+#define HOST_SLICE_POINTS 7U
+static uint32_t slice_armed[TASK_CORES], slice_left[TASK_CORES], irq_enabled[TASK_CORES];
+static uint32_t ticks_taken[TASK_CORES], slice_starts;
+void host_user_point(void);
+void host_kernel_point(void);
+int task_port_owned(void) { return core_id < TASK_CORES && !irq_enabled[core_id]; }
+void task_port_slice_start(uint32_t microseconds) {
+    if (microseconds != TASK_SLICE_US || slice_armed[core_id] || irq_enabled[core_id]) {
+        fprintf(stderr, "bad slice start on core %u\n", core_id); exit(1);
+    }
+    slice_armed[core_id] = 1;
+    slice_left[core_id] = HOST_SLICE_POINTS;
+    slice_starts++;
+}
+void task_port_slice_stop(void) { slice_armed[core_id] = 0; }
+void task_port_irq_enable(void) { irq_enabled[core_id] = 1; }
+void task_port_irq_disable(void) { irq_enabled[core_id] = 0; }
+static void host_interrupt_point(uint32_t enabled) {
+    unsigned int core = core_id;
+    if (!slice_armed[core] || (slice_left[core] && --slice_left[core])) return;
+    /* Exception entry masks IRQs; the handler stops the level-triggered timer. */
+    irq_enabled[core] = 0;
+    slice_armed[core] = 0;
+    ticks_taken[core]++;
+    task_tick();
+    task_trap_boundary();
+    /* The exception return restores the interrupted context's mask. */
+    irq_enabled[task_core()] = enabled;
+}
+void host_user_point(void) { host_interrupt_point(0); }
+void host_kernel_point(void) { if (irq_enabled[core_id]) host_interrupt_point(1); }
 uint32_t parallel_time_us(void) {
+    host_kernel_point();
 #ifdef _WIN32
     LARGE_INTEGER ticks, frequency;
     QueryPerformanceCounter(&ticks); QueryPerformanceFrequency(&frequency);

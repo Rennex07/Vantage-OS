@@ -25,7 +25,7 @@ jobs:
         run: |
           cmake -S . -B "$RUNNER_TEMP/scheduler" -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-omit-frame-pointer"
-          cmake --build "$RUNNER_TEMP/scheduler" --target task_smp_test process_test --parallel
+          cmake --build "$RUNNER_TEMP/scheduler" --target task_smp_test process_test preempt_test --parallel
           ctest --test-dir "$RUNNER_TEMP/scheduler" -L scheduler --output-on-failure
 
       - name: Install GNU AArch64 tools and model dependencies
@@ -36,7 +36,7 @@ jobs:
       - name: Build default kernel and test linked paths
         run: |
           make BUILD_DIR="$RUNNER_TEMP/arm" -j2
-          for suite in memory_management secondary_startup interrupts processes terminal tasks task_smp files pi4_drivers storage file_storage; do
+          for suite in memory_management secondary_startup interrupts processes preemption terminal tasks task_smp files pi4_drivers storage file_storage; do
             python "tests/arm/$suite.py" "$RUNNER_TEMP/arm/kernel8.elf" -v
           done
       - name: Build opt-in GPU path

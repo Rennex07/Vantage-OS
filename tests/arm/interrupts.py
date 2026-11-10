@@ -20,6 +20,7 @@ from memory_management import Image
 FRAME_BYTES = 800
 USER_STACK = 0x7b00000
 EL0, EL1_IRQS_ON = 0, 0x345
+CNTKCTL_EL1 = (14, 1, 3, 0, 0)
 CALLER_SAVED_X = range(2, 19)
 
 
@@ -113,7 +114,10 @@ class InterruptTests(unittest.TestCase):
         m = self.machine()
         for core in range(4):
             m.select(core)
+            m.uc.reg_write(regs.UC_ARM64_REG_CP_REG, CNTKCTL_EL1 + (0x303,))
             self.assertEqual(m.call('irq_init_core'), 1)
+            # User code gets no access to the timer registers.
+            self.assertEqual(m.system(CNTKCTL_EL1), 0)
             writes = [(address, value) for c, address, value in m.gic_writes if c == core]
             self.assertEqual((GICD_CTLR, 1) in writes, core == 0)
             self.assertIn((GICD_ISENABLER0, 1 << TIMER_IRQ), writes)

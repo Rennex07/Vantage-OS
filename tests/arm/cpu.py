@@ -98,6 +98,7 @@ class CpuMachine(Machine):
         self.last_stop = None
         self.stale_code = False
         self.entries = []          # (core, kind, origin EL, interrupted PC)
+        self.interrupted = []      # (core, ASID installed, interrupted PC) of each IRQ
         self.gic_writes = []       # (core, register, value)
         self.completed = []        # (core, EOIR value)
         self.maintenance = []      # (core, mnemonic, operand, register value)
@@ -372,6 +373,8 @@ class CpuMachine(Machine):
         if origin == 1 and kind == 'sync':
             raise AssertionError(f'kernel fault on core {self.core} at {pc:#x} (syndrome {syndrome:#x})')
         self.entries.append((self.core, kind, origin, pc))
+        if kind == 'irq':
+            self.interrupted.append((self.core, uc.reg_read(regs.UC_ARM64_REG_TTBR0_EL1) >> 48, pc))
         uc.reg_write(regs.UC_ARM64_REG_ELR_EL1, pc)
         uc.reg_write(regs.UC_ARM64_REG_CP_REG, (4, 0, 3, 0, 0, pstate))  # SPSR_EL1
         if syndrome is not None:
@@ -458,9 +461,13 @@ class CpuMachine(Machine):
         cpu.last_pc = self.pc
         return self.pc == stop
 
+    def lock_free(self):
+        return not struct.unpack('<I', self.uc.mem_read(self.image.symbols['scheduler_lock'], 4))[0]
+
     def interject(self, name, *args):
         """Call a kernel function from an interrupted run, on a spare stack,
         and resume the interrupted CPU state afterwards."""
+        assert self.lock_free(), 'the interrupted CPUs are inside the scheduler'
         saved, parked = self.uc.context_save(), self.cpu.idle
         self.set_pstate(EL1H_MASKED)
         try:

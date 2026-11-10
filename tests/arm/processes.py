@@ -198,6 +198,8 @@ class ProcessTests(unittest.TestCase):
             ('undefined instruction', lambda p: p.udf(), FAULT_UNDEFINED),
             ('read a translation register', lambda p: p.mrs(1, (3, 0, 2, 0, 0)), FAULT_UNDEFINED),
             ('mask interrupts', lambda p: p.emit(0xd50342df), FAULT_UNDEFINED),      # msr daifset, #2
+            ('stop the preemption timer', lambda p: p.mov(1, 2).msr((3, 3, 14, 3, 1), 1), FAULT_UNDEFINED),
+            ('move the preemption deadline', lambda p: p.mov(1, 0x7fffffff).msr((3, 3, 14, 3, 0), 1), FAULT_UNDEFINED),
             ('exception return', lambda p: p.emit(0xd69f03e0), FAULT_UNDEFINED),
         ]
         self.offenders(cases, batch=6)

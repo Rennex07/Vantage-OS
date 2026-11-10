@@ -22,8 +22,10 @@ void trap_sync_el0(TrapFrame* frame) {
     uint64_t syndrome;
     __asm__ volatile("mrs %0, esr_el1" : "=r"(syndrome));
     unsigned int class = (unsigned int)((syndrome >> SYNDROME_CLASS_SHIFT) & 0x3fU);
+    task_trap_boundary();
     if (class == CLASS_SVC64) {
         frame->x[0] = handle_sys_call(frame->x[8], frame->x[0]);
+        task_trap_boundary();
         return;
     }
     /* Any other synchronous exception ends the offending process only. */
@@ -36,5 +38,7 @@ void trap_sync_el0(TrapFrame* frame) {
 
 void trap_irq(TrapFrame* frame) {
     (void)frame;
-    (void)irq_service();
+    /* The interrupt is completed on this core before the task can migrate. */
+    if (irq_service() == IRQ_TIMER) task_tick();
+    task_trap_boundary();
 }

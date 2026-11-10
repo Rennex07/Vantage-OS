@@ -63,6 +63,36 @@ static void core_probe(void* argument) {
     task_exit(100 + (int)core);
 }
 
+static void preemption_probe(void* argument) {
+    unsigned int core = (unsigned int)(uintptr_t)argument;
+    TaskInfo info;
+    if (task_core() != core || task_preempt_begin() != TASK_OK) task_exit(-1);
+    /* Interrupt-enabled: only the clock is read until the region is closed. */
+    uint32_t start = parallel_time_us(), remaining = 0x4000000U;
+    while (parallel_time_us() - start < 3U * TASK_SLICE_US && --remaining) {}
+    task_preempt_end();
+    if (task_info(task_current(), &info) != TASK_OK || !info.preemptions) task_exit(-2);
+    task_exit(200 + (int)task_core());
+}
+
+int task_preemption_self_test(void) {
+    if (task_core() || task_current()) return 0;
+    uint32_t mask = parallel_task_mask();
+    TaskId ids[TASK_CORES] = {0};
+    for (unsigned int core = 0; core < TASK_CORES; core++) {
+        if (!(mask & (1U << core))) continue;
+        ids[core] = task_create_affinity(preemption_probe, (void*)(uintptr_t)core, 1U << core);
+        if (!ids[core]) return 0;
+    }
+    if (task_run() != TASK_OK) return 0;
+    int passed = 1;
+    for (unsigned int core = 0; core < TASK_CORES; core++) {
+        int status = 0;
+        if (ids[core] && (task_reap(ids[core], &status) != TASK_OK || status != 200 + (int)core)) passed = 0;
+    }
+    return passed;
+}
+
 int task_multicore_self_test(void) {
     if (task_core() || task_current() || parallel_task_mask() != TASK_ALL_CORES) return 0;
     TaskId ids[TASK_CORES];

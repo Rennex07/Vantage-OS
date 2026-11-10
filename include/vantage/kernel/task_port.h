@@ -20,6 +20,20 @@ void task_context_init(TaskContext* context, void* stack, size_t size,
 void task_context_dispose(TaskContext* context);
 void task_context_switch(TaskContext* previous, const TaskContext* next);
 void task_port_halt(const char* message);
+/* One-shot time slice on the calling core. Its interrupt stays pending while
+ * IRQs are masked and is withdrawn by stop. Called from the dispatcher. */
+void task_port_slice_start(uint32_t microseconds);
+void task_port_slice_stop(void);
+/* IRQ mask of the calling context; every other exception stays masked. */
+void task_port_irq_enable(void);
+void task_port_irq_disable(void);
+/* Upcalls from the trap layer, at EL1 with all exceptions masked, on the
+ * interrupted task's kernel stack. task_tick returns once the task is
+ * dispatched again, possibly on another core. task_trap_boundary is called
+ * on every kernel entry from and return to EL0 and does not return for a
+ * thread whose process has been terminated. */
+void task_tick(void);
+void task_trap_boundary(void);
 /* Installs a process root (with its ASID) as the calling core's user half;
  * 0 leaves only the kernel mapped. Called with the scheduler lock held. */
 void task_port_address_space(uint64_t root);

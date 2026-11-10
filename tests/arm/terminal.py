@@ -141,7 +141,8 @@ class TerminalTests(unittest.TestCase):
         asid = m.process_field(m.app, 36, 4)
         self.assertTrue(asid)
         self.assertEqual({caller for _, caller, *_ in m.syscalls}, {asid})
-        self.assertEqual({(kind, origin) for _, kind, origin, _ in m.entries}, {('sync', 0)})
+        # It was also preempted by timer ticks, always from EL0, and kept working.
+        self.assertEqual({(kind, origin) for _, kind, origin, _ in m.entries}, {('sync', 0), ('irq', 0)})
         self.assertTrue(all(USER_BASE <= pc < USER_END for *_, pc in m.entries))
         # A stack overflow would fault on the unmapped page below the stack.
         self.assertGreater(m.lowest_user_sp, USER_END - STACK_BYTES)

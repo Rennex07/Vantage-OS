@@ -150,7 +150,7 @@ class Machine:
         if mnemonic == 'mrs':
             dest, source = parts
             values = {'mpidr_el1': 0x80000000 | self.core, 'currentel': self.level,
-                      'daif': self.daif, 'sctlr_el1': self.sctlr}
+                      'daif': self.daif, 'sctlr_el1': self.sctlr, 'cntfrq_el0': 54000000}
             if source not in values:
                 self.failure = f'Unexpected MRS {operands}'
                 uc.emu_stop()

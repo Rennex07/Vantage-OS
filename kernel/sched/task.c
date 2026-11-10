@@ -89,7 +89,11 @@ static uint32_t dispatch_one(unsigned int core) {
     if (next->dispatches != ~(uint64_t)0) next->dispatches++;
     task_port_address_space(next->process ? next->process->root : 0);
     unlock();
+    /* The dispatcher keeps IRQs masked: the tick can only be taken once the
+     * task runs EL0 code or opens a preemptible region. */
+    task_port_slice_start(TASK_SLICE_US);
     task_context_switch(&dispatcher[core], &next->context);
+    task_port_slice_stop();
     /* The resumed dispatcher owns the lock handed over by this core's task.
      * Drop the user half before the task can be observed off this core: an
      * exited thread's address space may be freed as soon as the lock opens. */
@@ -140,7 +144,7 @@ TaskId sched_spawn(TaskEntry entry, void* argument, uint32_t affinity, Process* 
         task->status = 0;
         task->affinity = affinity;
         task->core = TASK_CORES;
-        task->dispatches = 0;
+        task->dispatches = task->preemptions = 0;
         task->process = process;
         if (process) process->live++;
         for (unsigned int j = 0; j < GUARD_BYTES; j++) task->stack[j] = GUARD_VALUE;
@@ -188,6 +192,38 @@ int task_yield(void) {
     return TASK_OK;
 }
 
+int task_preempt_begin(void) {
+    if (!owned() || !current[task_port_core()]) return TASK_INVALID;
+    task_port_irq_enable();
+    return TASK_OK;
+}
+
+void task_preempt_end(void) {
+    task_port_irq_disable();
+}
+
+void task_trap_boundary(void) {
+    if (!owned()) return;
+    Task* task = current[task_port_core()];
+    /* A terminated process never executes another EL0 instruction. */
+    if (task && task->process && parallel_load(&task->process->terminating))
+        task_exit(0);
+}
+
+void task_tick(void) {
+    if (!owned()) return;
+    unsigned int core = task_port_core();
+    Task* task = current[core];
+    if (!task) return;
+    task_trap_boundary();
+    /* The interrupted context is complete in the trap frame on this task's
+     * kernel stack, so this is a yield from inside the interrupt handler. */
+    lock();
+    task->state = TASK_RUNNABLE;
+    if (task->preemptions != ~(uint64_t)0) task->preemptions++;
+    task_context_switch(&task->context, &dispatcher[core]);
+}
+
 void task_exit(int status) {
     if (!owned() || !current[task_port_core()])
         task_port_halt("[ERR] Task exit outside scheduler; halted\n");
@@ -199,8 +235,8 @@ void task_exit(int status) {
         /* Exit ends the whole process; the first request fixes its status. */
         lock();
         if (!process->terminating) {
-            process->terminating = 1;
             process->status = status;
+            parallel_store(&process->terminating, 1);
         }
         status = process->status;
         unlock();
@@ -281,6 +317,7 @@ int task_info(TaskId id, TaskInfo* info) {
         info->affinity = task->affinity;
         info->core = task->core;
         info->state = task->state;
+        info->preemptions = task->preemptions;
     }
     unlock();
     return task ? TASK_OK : TASK_INVALID;
