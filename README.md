@@ -12,7 +12,10 @@ make BUILD_DIR=out/pi4
 
 The kernel image is `out/pi4/prod/kernel8.img`; the linked test image is
 `out/pi4/kernel8.elf`. The kernel image is not a complete bootable SD-card image.
-V3D, Wi-Fi and storage validation remain explicit build-time options; see
+V3D rendering is probed at boot by default and falls back to CPU rendering;
+`make V3D=0` builds the CPU renderer only. It is validated against software
+models, not yet on a physical Pi. Wi-Fi and storage validation remain explicit
+build-time options; see
 [the hardware guide](docs/HARDWARE.md) and [storage guide](docs/STORAGE.md).
 
 ## Desktop simulator
