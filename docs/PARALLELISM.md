@@ -39,7 +39,7 @@ bounded command submission and an opt-in pixel self-test. See the
 [hardware driver guide](HARDWARE.md). Physical Pi validation remains pending;
 the default renderer still runs on the CPU.
 
-`drivers/video/display.c` already requests a framebuffer and virtual-offset
+`platform/pi4/display.c` already requests a framebuffer and virtual-offset
 changes from VideoCore firmware through the property mailbox. Drawing and
 framebuffer copying run on the ARM CPU. VideoCore-backed display output does
 not establish that V3D renders any shapes or executes compute jobs.

@@ -1,6 +1,6 @@
-#include "../../includes/task_internal.h"
-#include "../../includes/files_internal.h"
-#include "../../includes/parallel_internal.h"
+#include <vantage/kernel/task_port.h>
+#include <vantage/kernel/files.h>
+#include <vantage/kernel/parallel_port.h>
 
 #define ID_BITS 6U
 #define ID_MASK 63U

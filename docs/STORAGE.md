@@ -7,7 +7,7 @@ never automatically formatted, and failures never fall back to volatile files.
 
 ## Scope and interface
 
-The portable SD engine in `drivers/sd.c` is the retained implementation; the
+The portable SD engine in `drivers/storage/sd.c` is the retained implementation; the
 nightly tutorial driver and FAT reader are not combined with it. The EMMC2
 adapter, read/write/erase protocol and firmware handoff are in [SD.md](SD.md).
 
@@ -169,12 +169,12 @@ reviewed change before modifying the normal-boot gate.
 ## Software verification
 
 ```sh
-cmake -S kernel/fs -B /path/to/files-tests
+cmake -S . -B /path/to/files-tests
 cmake --build /path/to/files-tests --config Release
-ctest --test-dir /path/to/files-tests -C Release --output-on-failure
-cmake -S drivers -B /path/to/driver-tests
+ctest --test-dir /path/to/files-tests -C Release -L storage --output-on-failure
+cmake -S . -B /path/to/driver-tests
 cmake --build /path/to/driver-tests --config Release
-ctest --test-dir /path/to/driver-tests -C Release --output-on-failure
+ctest --test-dir /path/to/driver-tests -C Release -L drivers --output-on-failure
 python -B -m unittest discover -s tests/tools -v
 python -B tests/arm/files.py /path/to/fresh/kernel8.elf -v
 python -B tests/arm/storage.py /path/to/fresh/kernel8.elf -v

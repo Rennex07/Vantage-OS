@@ -1,5 +1,5 @@
-#include "../../includes/task.h"
-#include "../../includes/parallel_internal.h"
+#include <vantage/kernel/task.h>
+#include <vantage/kernel/parallel_port.h>
 
 typedef struct {
     unsigned int count[2];

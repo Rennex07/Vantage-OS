@@ -25,14 +25,14 @@ third-party assets retain their applicable licenses.
 
 ## Layout and interfaces
 
-- `drivers/sd.c`: portable command sequencing, clock division, CSD decoding,
+- `drivers/storage/sd.c`: portable command sequencing, clock division, CSD decoding,
   timeouts and PIO read/write/erase. `SdCard` is caller-owned; `SdIo` supplies 32-bit register
   access and microsecond timing. All callbacks must return promptly.
-- `drivers/sd_pi4.c`: fixed EMMC2 MMIO adapter at ARM physical address
+- `platform/pi4/sd.c`: fixed EMMC2 MMIO adapter at ARM physical address
   `0xfe340000`. Calls are restricted to masked EL1 on core 0, from boot or
   immutable core-0-pinned tasks. Movable tasks are rejected even when temporarily
   running there. MMIO accesses include ordering barriers.
-- `kernel/sched/delays/delay.c`: the BCM2711 1 MHz system timer, sampled
+- `platform/pi4/timer.c`: the BCM2711 1 MHz system timer, sampled
   high/low/high with a retry on carry. Microsecond and millisecond delays use
   unsigned 64-bit elapsed time; millisecond multiplication is widened first.
 
@@ -67,7 +67,7 @@ partition boundaries. Software cannot promise secure deletion inside card flash.
 The legacy declared spelling `sd_readBlock(lba, buffer, count)` remains as a
 byte-count/zero-on-error wrapper. It cannot verify the caller's actual allocation;
 new callers should use the size-checked interface. The old private `sd_cmd` and
-global `sd_err` interface is removed. `kernel/fs/storage_pi4.c` adapts the checked
+global `sd_err` interface is removed. `platform/pi4/storage.c` adapts the checked
 interfaces to the filesystem's sector device. `sd_init` requires the actual
 base-clock frequency.
 
@@ -141,9 +141,9 @@ handling and the corresponding validation procedure are in [STORAGE.md](STORAGE.
 
 ## Regression tests
 
-Build the native tests with `cmake -S drivers -B <build>` and
+Build the native tests with `cmake -S . -B <build>` and
 `cmake --build <build> --config Release`, then run
-`ctest --test-dir <build> -C Release --output-on-failure`. The simulator build also
+`ctest --test-dir <build> -C Release -L drivers --output-on-failure`. The simulator build also
 includes `sd_controller` and `delays`. The controller model independently handles
 write-one-to-clear status, command response types, card replies, the read FIFO
 and transfer completion. Cases include writes, CMD13 programming/errors, erase

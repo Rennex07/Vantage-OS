@@ -47,7 +47,7 @@ def main():
             parser.error('Refusing to overwrite an unrelated manifest file.')
         if not isinstance(previous, dict) or previous.get('format') != 'vantage-wifi-assets-v1':
             parser.error('Refusing to overwrite an unrelated manifest file.')
-    lines = [marker, '#include "wifi.h"', '']
+    lines = [marker, '#include <vantage/drivers/wifi.h>', '']
     for name, data in blobs.items():
         lines.append(f'static const unsigned char {name}[] = {{')
         for offset in range(0, len(data), 16):

@@ -3,7 +3,7 @@
 #define _FILE_OFFSET_BITS 64
 #endif
 #include "storage_host.h"
-#include "../../includes/files_internal.h"
+#include <vantage/kernel/files.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #ifdef _WIN32

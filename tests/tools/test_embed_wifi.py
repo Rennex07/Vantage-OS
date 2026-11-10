@@ -28,6 +28,7 @@ class EmbedTests(unittest.TestCase):
     def test_reproducible_output_and_hash_manifest(self):
         self.assertEqual(self.run_tool().returncode, 0)
         before = self.output.read_bytes()
+        self.assertIn(b'#include <vantage/drivers/wifi.h>', before)
         self.assertEqual(self.run_tool().returncode, 0)
         self.assertEqual(before, self.output.read_bytes())
         data = json.loads(self.output.with_suffix('.json').read_text())

@@ -1,12 +1,12 @@
 /* SDL2 platform backend for the Vantage-OS simulator.
  *
- * Implements the seam declared in includes/platform.h. Built only by
+ * Implements the seam declared in vantage/kernel/platform.h. Built only by
  * sim/CMakeLists.txt; this file is never compiled into kernel8.img.
  */
 
-#include "../../includes/platform.h"
-#include "../../includes/io.h"
-#include "../../includes/console.h"
+#include <vantage/kernel/platform.h>
+#include <vantage/platform/pi4/io.h>
+#include <vantage/abi/console.h>
 #include "display_sim.h"
 
 #include "SDL2/SDL.h"

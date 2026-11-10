@@ -25,7 +25,7 @@ Initialization is one-shot. The existing `task_create` pins work to core 0 for
 compatibility with device services. New compute work can use explicit affinity:
 
 ```c
-#include "includes/task.h"
+#include <vantage/kernel/task.h>
 
 static void compute(void* argument) {
     unsigned int shard = (unsigned int)(uintptr_t)argument;
@@ -111,9 +111,9 @@ policy is not a claim that rendering becomes faster with multicore scheduling.
 ## Verification
 
 ```sh
-cmake -S kernel/sched -B /path/to/scheduler-tests
+cmake -S . -B /path/to/scheduler-tests
 cmake --build /path/to/scheduler-tests --config Release
-ctest --test-dir /path/to/scheduler-tests -C Release --output-on-failure
+ctest --test-dir /path/to/scheduler-tests -C Release -L scheduler --output-on-failure
 python -B tests/arm/tasks.py /path/to/fresh/kernel8.elf -v
 python -B tests/arm/task_smp.py /path/to/fresh/kernel8.elf -v
 ```

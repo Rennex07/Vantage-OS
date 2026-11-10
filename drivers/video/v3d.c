@@ -3,7 +3,7 @@
  * V3D 4.2 packet layout follows Random06457's MIT-licensed Pi 4 examples.
  * MMU/cache register semantics: Linux v6.12 drivers/gpu/drm/v3d (GPL-2.0+).
  * See docs/licenses/v3d-examples-MIT.txt and docs/HARDWARE.md. */
-#include "../../includes/video/v3d.h"
+#include <vantage/drivers/v3d.h>
 
 #define HUB 0xfec00000ULL
 #define CORE 0xfec04000ULL

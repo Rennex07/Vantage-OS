@@ -7,7 +7,8 @@ disabled at boot unless explicitly enabled at build time. TCP/IP is separate.
 
 ## Builds
 
-Use a fresh external `BUILD_DIR` whenever changing build options. The existing
+Use a fresh external `BUILD_DIR` after source-layout changes. Build-option
+changes are tracked automatically. The existing
 GNU AArch64 toolchain builds all driver code in a normal kernel. Opt-in startup:
 
 ```sh
@@ -106,9 +107,9 @@ network connectivity. Keep credentials in caller-owned runtime memory.
 ## Verification
 
 ```sh
-cmake -S drivers -B /path/to/driver-tests
+cmake -S . -B /path/to/driver-tests
 cmake --build /path/to/driver-tests
-ctest --test-dir /path/to/driver-tests --output-on-failure
+ctest --test-dir /path/to/driver-tests -L drivers --output-on-failure
 python -m unittest discover -s tests/tools -v
 python tests/arm/pi4_drivers.py /path/to/fresh/kernel8.elf -v
 ```

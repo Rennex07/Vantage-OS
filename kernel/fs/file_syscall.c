@@ -1,5 +1,5 @@
-#include "../../includes/files_internal.h"
-#include "../../includes/platform.h"
+#include <vantage/kernel/files.h>
+#include <vantage/kernel/platform.h>
 
 static int valid(uintptr_t address, size_t size, unsigned int alignment) {
     return !(address % alignment) && user_buffer_valid(address, size);

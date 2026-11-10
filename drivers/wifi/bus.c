@@ -1,4 +1,4 @@
-#include "../../includes/wifi.h"
+#include <vantage/drivers/wifi.h>
 
 static int direct(void* context, unsigned int function, uint32_t address, int write, uint8_t* value) {
     return sdio_direct(context, function, address, write, value);

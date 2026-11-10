@@ -1,7 +1,7 @@
 #define SDL_MAIN_HANDLED
 #include "SDL2/SDL.h"
-#include "../../includes/parallel_internal.h"
-#include "../../includes/video/raster.h"
+#include <vantage/kernel/parallel_port.h>
+#include <vantage/kernel/raster.h>
 #include <stdio.h>
 #include <stdlib.h>
 

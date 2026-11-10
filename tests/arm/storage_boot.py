@@ -19,7 +19,7 @@ def boot(image, mount=0, probe=0, task_probe=1):
               'secondary_core_start': 1, 'env_Init': 0, 'mmu_is_enabled': 1,
               'parallel_init': 1, 'parallel_self_test': 1, 'pi4_drivers_start': 0,
               'task_init': 1, 'task_self_test': 1, 'task_multicore_self_test': task_probe, 'storage_start': mount,
-              'storage_reboot_probe': probe, 'task_create': 1}
+              'storage_reboot_probe': probe, 'task_create': 1, 'sd_init': 0}
 
     def stub(uc, address, size, name):
         args = (uc.reg_read(regs.UC_ARM64_REG_X0), uc.reg_read(regs.UC_ARM64_REG_X1))
@@ -51,6 +51,7 @@ class BootTests(unittest.TestCase):
         self.assertFalse(m.failure)
         self.assertIn('task_create', [name for name, _ in events])
         self.assertNotIn('storage_start', [name for name, _ in events])
+        self.assertNotIn('sd_init', [name for name, _ in events])
         self.assertIn(b'SD storage disabled', log)
 
     def test_opt_in_mount_probe_and_recovery_warning(self):

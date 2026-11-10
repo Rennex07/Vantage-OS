@@ -1,4 +1,4 @@
-#include "../../includes/storage.h"
+#include <vantage/kernel/storage.h>
 
 #if FILE_LIMIT != 16 || FILE_CAPACITY != 4096
 #error Storage format version 1 requires 16 files of 4096 bytes

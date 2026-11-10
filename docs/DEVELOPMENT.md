@@ -1,17 +1,21 @@
 # Developer guide
 
+Start with [architecture and ownership](ARCHITECTURE.md) for the source map,
+dependency boundaries, build entry points and module-extension checklist.
+
 ## Simulator architecture
 
-`includes/platform.h` declares the hardware surface, and two backends implement
+`include/vantage/kernel/platform.h` declares the hardware surface, and two backends implement
 it:
 
 | Backend | Files | Built by |
 |---|---|---|
-| HDMI framebuffer + I2C touch | `drivers/video/display.c`, `drivers/input/touch.c`, `drivers/I2C.c` | `make` → `kernel8.img` |
+| HDMI framebuffer + I2C touch | `platform/pi4/display.c`, `drivers/input/touch.c`, `platform/pi4/i2c.c` | `make` → `kernel8.img` |
 | SDL2 window + mouse | `sim/platform/display_sim.c` | `sim/CMakeLists.txt` → `vantage_sim.exe` |
 
-`init/main.c`, `drivers/video/graphics.c`, `user/env/windowManager.c`,
-`user/env/terminal*.c` and `user/lib/user_lib.c` are shared by both targets. The simulator defines
+`kernel/syscall/dispatch.c`, `kernel/ui/`, `user/apps/terminal/`
+and `user/lib/user_lib.c` are shared by both targets. Hardware boot sequencing
+is separate in `kernel/boot/main.c`. The simulator defines
 `VANTAGE_SIM` to skip ARM user-mode startup and route syscall wrappers directly
 to the same `handle_sys_call` dispatcher. `sim/main.c` starts the shared
 `user_task` on desktop. This simulates the application, not ARM privilege levels
@@ -29,7 +33,7 @@ ctest --test-dir sim/build -C Release --output-on-failure
 
 ## Hardware user memory
 
-The C subsystem in [`mm/`](../mm/README.md) discovers firmware RAM/reservations,
+The C subsystem in [`kernel/mm/`](../kernel/mm/README.md) discovers firmware RAM/reservations,
 manages physical pages, and supplies the renderer's kernel heap. It runs discovery
 before secondary release, finalizes reservations before MMU enablement, and keeps
 the shared tables immutable. Before clearing BSS, a file-backed bootstrap stack
@@ -241,7 +245,7 @@ joins; do not infer hardware compatibility from modeled or host-thread tests.
 ## Application files
 
 Apps access a small **persistent snapshot filesystem** through `sys_file_*` in
-`user/include/user_lib.h` after an explicit successful storage mount. Normal Pi
+`include/vantage/user.h` after an explicit successful storage mount. Normal Pi
 boot keeps SD disabled pending physical validation, so files are unavailable
 there. The simulator can mount a regular image through `VANTAGE_STORAGE_IMAGE`.
 The legacy block-device RAM disk is separate. Provisioning, crash recovery,
@@ -306,9 +310,9 @@ fresh-process persistence and interrupted snapshot commits.
 They can run without SDL:
 
 ```sh
-cmake -S kernel/fs -B out/files-host
+cmake -S . -B out/files-host
 cmake --build out/files-host
-ctest --test-dir out/files-host --output-on-failure
+ctest --test-dir out/files-host -L storage --output-on-failure
 python tests/arm/files.py /path/to/fresh/kernel8.elf -v
 ```
 
@@ -334,12 +338,12 @@ Optional Pi 4 V3D clear/copy and CYW43455 Ethernet transport are documented in
 boot by default. The V3D option accelerates full-canvas clears only after its
 pixel self-test; normal shapes and presentation still use the CPU path.
 
-`includes/video/graphics.h` is the drawing API and is portable across both
+`include/vantage/kernel/canvas.h` is the privileged drawing API, portable across both
 builds. Its bounded `canvas_text_row` API draws 8x16 ASCII cells using a
 JetBrains Mono bitmap font (SIL Open Font License). The terminal app accesses it through a validated
 fixed-size syscall payload, rather than drawing directly from EL0.
 
-`Window` in `includes/env/windowManager.h` already carries `title[32]`,
+`Window` in `include/vantage/kernel/window_manager.h` already carries `title[32]`,
 `titleColor` and an `onTouch` callback, but nothing reads them yet. That is where
 UI behaviour attaches.
 
@@ -349,7 +353,7 @@ See [the terminal guide](TERMINAL.md) for commands and input setup.
 
 ### Application and input
 
-- `user/env/terminal.c` owns the bounded screen model and command editing.
+- `user/apps/terminal/terminal.c` owns the bounded screen model and command editing.
   Commands have a 127-character limit, reduced on smaller screens; overflow
   discards the command. Its file editor uses the existing `SYS_FILE_*` wrappers,
   keeps a 4096-byte buffer in the terminal's user-owned state, and requires a
@@ -357,7 +361,7 @@ See [the terminal guide](TERMINAL.md) for commands and input setup.
   insertion, line navigation/deletion and unsaved-exit confirmation without a
   visible cursor. The disk format and file ABI are unchanged. See
   [the editor contract](TERMINAL.md#persistent-text-files).
-- `user/env/terminal_app.c` stores mutable state in `.user.bss` on Pi. It polls
+- `user/apps/terminal/app.c` stores mutable state in `.user.bss` on Pi. It polls
   at most 64 keyboard and 64 touch events per step and redraws only dirty content.
   On the 480x800 canvas, the keyboard uses 272 pixels, leaving 33 text rows.
 - Keyboard rendering and hit testing share geometry. Ordinary taps commit on
@@ -406,7 +410,7 @@ only validated outputs. Existing touch and shape syscalls remain available.
 
 The renderer checks row, cursor, pixel bounds, radius and label size while
 preserving canvas color. Button labels hold seven characters plus a terminator;
-text scale is native for 0/1 and doubled for 2. `kernel/memory.c` provides the
+text scale is native for 0/1 and doubled for 2. `lib/memory.c` provides the
 freestanding copy/zero routines needed by compiler-generated structure operations;
 its Makefile flag prevents recursive library-call optimization.
 

@@ -1,6 +1,6 @@
-#include "../../includes/input/touch.h"
-#include "../../includes/I2C.h"
-#include "../../includes/io.h"
+#include <vantage/drivers/touch.h>
+#include <vantage/platform/pi4/i2c.h>
+#include <vantage/platform/pi4/io.h>
 
 #define TOUCH_POINTS 10
 #define CONTROLLER_DOWN 0

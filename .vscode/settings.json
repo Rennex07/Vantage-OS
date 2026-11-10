@@ -1,5 +1,5 @@
 {
-    "C_Cpp.errorSquiggles": "disabled",
-    "C_Cpp.default.compilerPath": "C:/msys64/ucrt64/bin/gcc.exe",
-    "cmake.sourceDirectory": "C:/Users/idkf0/Documents/Vantage-OS/sim"
+    "C_Cpp.default.includePath": ["${workspaceFolder}/include"],
+    "cmake.sourceDirectory": "${workspaceFolder}",
+    "cmake.buildDirectory": "${workspaceFolder}/out/host"
 }

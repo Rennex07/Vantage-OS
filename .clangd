@@ -4,4 +4,3 @@ CompileFlags:
     - -ffreestanding
     - -nostdinc
     - -Iinclude
-    - -Iuser/include

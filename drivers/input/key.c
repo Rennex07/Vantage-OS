@@ -1,5 +1,5 @@
-#include "../../includes/input/key.h"
-#include "../../includes/io.h"
+#include <vantage/drivers/key.h>
+#include <vantage/platform/pi4/io.h>
 
 static uint32_t escape, previous_cr, discard;
 

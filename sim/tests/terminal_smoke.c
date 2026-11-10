@@ -1,6 +1,6 @@
-#include "../../includes/env/windowManager.h"
-#include "../../user/include/terminal.h"
-#include "../../user/include/user_lib.h"
+#include <vantage/kernel/window_manager.h>
+#include "user/apps/terminal/terminal.h"
+#include <vantage/user.h>
 #include "../platform/display_sim.h"
 #include "../../drivers/video/font8x16.h"
 #include <SDL2/SDL.h>

@@ -1,5 +1,5 @@
-#include "../../includes/task_internal.h"
-#include "../../includes/io.h"
+#include <vantage/kernel/task_port.h>
+#include <vantage/platform/pi4/io.h>
 
 typedef char context_size_must_match_assembly[(sizeof(TaskContext) == 208) ? 1 : -1];
 typedef char context_sp_offset_must_match[( __builtin_offsetof(TaskContext, sp) == 96) ? 1 : -1];

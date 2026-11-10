@@ -1,6 +1,6 @@
 /* SDHCI/SDIO register definitions: BCM2711 ARM Peripherals and SDIO CCCR.
  * The removable SD driver owns EMMC2; this host is dedicated to onboard WLAN. */
-#include "../../includes/sdio.h"
+#include <vantage/drivers/sdio.h>
 
 #define BASE 0xfe300000ULL
 #define GPIO 0xfe200000ULL

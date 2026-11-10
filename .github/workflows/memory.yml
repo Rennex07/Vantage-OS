@@ -13,54 +13,58 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install AArch64 tools and test harness
+      - name: Build host suites with address and undefined-behavior sanitizers
+        run: |
+          cmake -S . -B "$RUNNER_TEMP/native" -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake --build "$RUNNER_TEMP/native" --parallel
+          ctest --test-dir "$RUNNER_TEMP/native" \
+            -L '^(drivers|memory|storage|user|tooling)$' --output-on-failure
+      - name: Test scheduler host context switching with UBSan
+        # ASan does not fully support the POSIX ucontext stack-switching model.
+        run: |
+          cmake -S . -B "$RUNNER_TEMP/scheduler" -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-omit-frame-pointer"
+          cmake --build "$RUNNER_TEMP/scheduler" --target task_smp_test --parallel
+          ctest --test-dir "$RUNNER_TEMP/scheduler" -L scheduler --output-on-failure
+
+      - name: Install GNU AArch64 tools and model dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           python -m pip install unicorn==2.1.4 capstone==5.0.7
-      - name: Build and test native allocation/discovery with sanitizers
+      - name: Build default kernel and test linked paths
         run: |
-          cmake -S mm -B "$RUNNER_TEMP/mm-host" -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-          cmake --build "$RUNNER_TEMP/mm-host" --parallel
-          ctest --test-dir "$RUNNER_TEMP/mm-host" --output-on-failure
-      - name: Build and test persistent storage with sanitizers
-        run: |
-          cmake -S kernel/fs -B "$RUNNER_TEMP/files-host" -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-          cmake --build "$RUNNER_TEMP/files-host" --parallel
-          ctest --test-dir "$RUNNER_TEMP/files-host" --output-on-failure
-      - name: Test four-core scheduler on host threads with UBSan
-        run: |
-          cmake -S kernel/sched -B "$RUNNER_TEMP/scheduler-host" -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-omit-frame-pointer"
-          cmake --build "$RUNNER_TEMP/scheduler-host" --parallel
-          ctest --test-dir "$RUNNER_TEMP/scheduler-host" --output-on-failure
-      - name: Build kernel and test linked ARM paths
-        run: |
-          make BUILD_DIR="$RUNNER_TEMP/mm-arm" -j2
-          python tests/arm/memory_management.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
-          python tests/arm/secondary_startup.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
-          python tests/arm/terminal.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
-          python tests/arm/tasks.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
-          python tests/arm/task_smp.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
-          python tests/arm/files.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
-          python tests/arm/pi4_drivers.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
-          python tests/arm/storage.py "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
-      - name: Test driver protocol models with sanitizers
-        run: |
-          cmake -S drivers -B "$RUNNER_TEMP/drivers-host" -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-          cmake --build "$RUNNER_TEMP/drivers-host" --parallel
-          ctest --test-dir "$RUNNER_TEMP/drivers-host" --output-on-failure
-          python -m unittest discover -s tests/tools -v
+          make BUILD_DIR="$RUNNER_TEMP/arm" -j2
+          for suite in memory_management secondary_startup terminal tasks task_smp files pi4_drivers storage file_storage; do
+            python "tests/arm/$suite.py" "$RUNNER_TEMP/arm/kernel8.elf" -v
+          done
       - name: Build opt-in GPU path
-        run: make BUILD_DIR="$RUNNER_TEMP/v3d-arm" V3D=1 -j2
-      - name: Verify storage boot gate and rebuild after changing options
+        run: make BUILD_DIR="$RUNNER_TEMP/v3d" V3D=1 -j2
+      - name: Compile combined GPU and Wi-Fi path with synthetic assets
+        # Compile-only fixture: these bytes are not usable radio firmware.
         run: |
-          cp "$RUNNER_TEMP/mm-arm/kernel8.elf" "$RUNNER_TEMP/default-kernel8.elf"
-          make BUILD_DIR="$RUNNER_TEMP/mm-arm" STORAGE_VALIDATION=1 SD_BASE_CLOCK_HZ=100000000 STORAGE_PARTITION=1 -j2
-          python tests/arm/storage_boot.py "$RUNNER_TEMP/default-kernel8.elf" "$RUNNER_TEMP/mm-arm/kernel8.elf" -v
+          mkdir -p "$RUNNER_TEMP/wifi"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'wifi'
+          (root / 'firmware.bin').write_bytes(b'\x01\x02\x03\x04' * 8)
+          (root / 'nvram.txt').write_text('boardtype=0x1\n')
+          (root / 'clm.bin').write_bytes(b'synthetic-compile-fixture')
+          PY
+          python tools/embed_wifi.py --firmware "$RUNNER_TEMP/wifi/firmware.bin" \
+            --nvram "$RUNNER_TEMP/wifi/nvram.txt" --clm "$RUNNER_TEMP/wifi/clm.bin" \
+            --country GB --regrev 0 --output "$RUNNER_TEMP/wifi/assets.c"
+          make BUILD_DIR="$RUNNER_TEMP/wifi-arm" V3D=1 WIFI=1 \
+            WIFI_FIRMWARE_C="$RUNNER_TEMP/wifi/assets.c" -j2
+      - name: Verify storage boot gate and option-sensitive rebuilding
+        run: |
+          cp "$RUNNER_TEMP/arm/kernel8.elf" "$RUNNER_TEMP/default-kernel8.elf"
+          make BUILD_DIR="$RUNNER_TEMP/arm" STORAGE_VALIDATION=1 \
+            SD_BASE_CLOCK_HZ=100000000 STORAGE_PARTITION=1 -j2
+          python tests/arm/storage_boot.py "$RUNNER_TEMP/default-kernel8.elf" \
+            "$RUNNER_TEMP/arm/kernel8.elf" -v
 
   desktop:
     name: Desktop terminal and simulator
@@ -71,8 +75,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libsdl2-dev
-      - name: Build and test simulator
+      - name: Build simulator and run integration tests
         run: |
-          cmake -S sim -B "$RUNNER_TEMP/sim" -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/sim" --parallel
-          ctest --test-dir "$RUNNER_TEMP/sim" --output-on-failure
+          cmake -S . -B "$RUNNER_TEMP/desktop" -DCMAKE_BUILD_TYPE=Release \
+            -DVANTAGE_BUILD_SIMULATOR=ON
+          cmake --build "$RUNNER_TEMP/desktop" --parallel
+          ctest --test-dir "$RUNNER_TEMP/desktop" -L simulator --output-on-failure

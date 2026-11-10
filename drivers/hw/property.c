@@ -1,4 +1,4 @@
-#include "../../includes/hardware.h"
+#include <vantage/drivers/hardware.h>
 
 #define MBOX_READ 0xfe00b880ULL
 #define MBOX_STATUS 0xfe00b898ULL

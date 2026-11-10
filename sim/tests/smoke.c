@@ -1,5 +1,5 @@
-#include "../../includes/env/windowManager.h"
-#include "../../user/include/user_lib.h"
+#include <vantage/kernel/window_manager.h>
+#include <vantage/user.h>
 #include <SDL2/SDL.h>
 
 static int check_pixel(SDL_Renderer* renderer, int x, int y, uint32_t expected) {

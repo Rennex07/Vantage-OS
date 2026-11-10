@@ -1,5 +1,5 @@
-#include "../../includes/mmu.h"
-#include "../../includes/memory.h"
+#include <vantage/arch/mmu.h>
+#include <vantage/kernel/memory.h>
 
 #define MAIR_VALUE 0x44FF00ULL
 #define TCR_VALUE (32ULL | (1ULL << 8) | (1ULL << 10) | (3ULL << 12) | (1ULL << 23) | (2ULL << 32))

@@ -1,7 +1,7 @@
 /* CYW43455 SDIO/backplane and SDPCM/BCDC protocol, referenced against
  * Linux v6.12 brcmfmac (ISC, Copyright 2010/2014 Broadcom Corporation).
  * See docs/licenses/brcmfmac-ISC.txt and docs/HARDWARE.md. */
-#include "../../includes/wifi.h"
+#include <vantage/drivers/wifi.h>
 
 #define RAM_BASE 0x198000U
 #define ENUM_BASE 0x18000000U

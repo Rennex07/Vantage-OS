@@ -1,5 +1,5 @@
-#include "../../includes/parallel_internal.h"
-#include "../../includes/io.h"
+#include <vantage/kernel/parallel_port.h>
+#include <vantage/platform/pi4/io.h>
 
 uint32_t parallel_load(const uint32_t* value) {
     return __atomic_load_n(value, __ATOMIC_ACQUIRE);

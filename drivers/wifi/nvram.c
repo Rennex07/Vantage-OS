@@ -1,4 +1,4 @@
-#include "../../includes/wifi.h"
+#include <vantage/drivers/wifi.h>
 
 int wifi_nvram_pack(const unsigned char* text, size_t bytes, unsigned char* output,
                      size_t capacity, size_t* packed_bytes) {

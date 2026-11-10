@@ -1,5 +1,5 @@
-#include "../../includes/mmu.h"
-#include "../../includes/memory.h"
+#include <vantage/arch/mmu.h>
+#include <vantage/kernel/memory.h>
 
 #define ATTR_DEVICE 0
 #define ATTR_NORMAL 1

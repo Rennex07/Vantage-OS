@@ -1,6 +1,6 @@
-#include "../../includes/files_internal.h"
+#include <vantage/kernel/files.h>
 #ifndef VANTAGE_SIM
-#include "../../includes/task.h"
+#include <vantage/kernel/task.h>
 #endif
 
 static int services_owned(void) {

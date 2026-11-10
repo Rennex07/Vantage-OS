@@ -1,6 +1,6 @@
-#include "../../user/include/terminal.h"
-#include "../../user/include/user_lib.h"
-#include "../../includes/files_internal.h"
+#include "user/apps/terminal/terminal.h"
+#include <vantage/user.h>
+#include <vantage/kernel/files.h>
 #include "../platform/storage_host.h"
 #include <stdio.h>
 #include <stdlib.h>

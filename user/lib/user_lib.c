@@ -1,9 +1,9 @@
-#include "../include/user_lib.h"
-#include "../../includes/task_api.h"
+#include <vantage/user.h>
+#include <vantage/abi/syscall.h>
 
 #ifdef VANTAGE_SIM
 /* Desktop builds use the same dispatcher without an ARM exception. */
-uint64_t handle_sys_call(uint64_t syscall_id, uint64_t arg0);
+#include <vantage/kernel/syscall.h>
 
 static inline uint64_t syscall(uint64_t id, uint64_t arg) {
     return handle_sys_call(id, arg);
@@ -91,48 +91,48 @@ int sys_file_remove(const char* path) {
 }
 
 uint32_t sys_touch_read(TouchEvent* event) {
-    return (uint32_t)syscall(1, (uint64_t)event);
+    return (uint32_t)syscall(SYS_TOUCH_READ, (uint64_t)event);
 }
 
 void sys_canvas_set_color(uint32_t color) {
-    syscall(2, color);
+    syscall(SYS_CANVAS_SET_COLOR, color);
 }
 
 void sys_canvas_clear(void) {
-    syscall(3, 0);
+    syscall(SYS_CANVAS_CLEAR, 0);
 }
 
 void sys_canvas_fill_circle(int x, int y, int r) {
     struct circle_args args = { .x = x, .y = y, .r = r };
-    syscall(4, (uint64_t)&args);
+    syscall(SYS_CANVAS_FILL_CIRCLE, (uint64_t)&args);
 }
 
 void sys_canvas_present(void) {
-    syscall(5, 0);
+    syscall(SYS_CANVAS_PRESENT, 0);
 }
 
 uint32_t sys_key_read(KeyEvent* event) {
-    return (uint32_t)syscall(6, (uint64_t)(uintptr_t)event);
+    return (uint32_t)syscall(SYS_KEY_READ, (uint64_t)(uintptr_t)event);
 }
 
 uint32_t sys_canvas_text_row(const TextRow* row) {
-    return (uint32_t)syscall(7, (uint64_t)(uintptr_t)row);
+    return (uint32_t)syscall(SYS_CANVAS_TEXT_ROW, (uint64_t)(uintptr_t)row);
 }
 
 uint32_t sys_canvas_button(const CanvasButton* button) {
-    return (uint32_t)syscall(11, (uint64_t)(uintptr_t)button);
+    return (uint32_t)syscall(SYS_CANVAS_BUTTON, (uint64_t)(uintptr_t)button);
 }
 
 uint32_t sys_console_info(ConsoleInfo* info) {
-    return (uint32_t)syscall(8, (uint64_t)(uintptr_t)info);
+    return (uint32_t)syscall(SYS_CONSOLE_INFO, (uint64_t)(uintptr_t)info);
 }
 
 void sys_frame_wait(void) {
-    syscall(9, 0);
+    syscall(SYS_FRAME_WAIT, 0);
 }
 
 uint32_t sys_time_us(void) {
-    return (uint32_t)syscall(12, 0);
+    return (uint32_t)syscall(SYS_TIME_US, 0);
 }
 
 void sys_console_write(const char* text, size_t length) {
@@ -142,7 +142,7 @@ void sys_console_write(const char* text, size_t length) {
         uint32_t i;
         request.length = length < CONSOLE_WRITE_MAX ? (uint32_t)length : CONSOLE_WRITE_MAX;
         for (i = 0; i < request.length; i++) request.text[i] = text[i];
-        if (syscall(10, (uint64_t)(uintptr_t)&request) != request.length) return;
+        if (syscall(SYS_CONSOLE_WRITE, (uint64_t)(uintptr_t)&request) != request.length) return;
         text += request.length;
         length -= request.length;
     }

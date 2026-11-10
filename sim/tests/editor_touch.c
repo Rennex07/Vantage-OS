@@ -1,7 +1,7 @@
-#include "../../includes/env/windowManager.h"
-#include "../../includes/files_internal.h"
-#include "../../user/include/terminal.h"
-#include "../../user/include/user_lib.h"
+#include <vantage/kernel/window_manager.h>
+#include <vantage/kernel/files.h>
+#include "user/apps/terminal/terminal.h"
+#include <vantage/user.h>
 #include "../platform/display_sim.h"
 #include <SDL2/SDL.h>
 #include <stdio.h>
