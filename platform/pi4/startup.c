@@ -2,6 +2,7 @@
 #include <vantage/drivers/v3d.h>
 #include <vantage/platform/pi4/display.h>
 #include <vantage/kernel/memory.h>
+#include <vantage/kernel/render.h>
 #include <vantage/platform/pi4/io.h>
 
 #ifndef VANTAGE_V3D
@@ -13,6 +14,20 @@
 
 #if VANTAGE_V3D
 static V3d gpu;
+
+static int gpu_fill(void* context, const RasterFill* fill) {
+    V3d* device = context;
+    if (fill->x || fill->y || fill->width != device->width || fill->height != device->height)
+        return RENDER_SKIP;
+    return v3d_clear(device, 0, fill->color) == HW_OK ? RENDER_DONE : RENDER_FAILED;
+}
+
+static void gpu_retired(void* context) {
+    (void)context;
+    uart_writeText("[ERR] V3D stopped; CPU rendering resumed\n");
+}
+
+static RenderBackend gpu_backend = {"V3D", &gpu, NULL, gpu_fill, NULL, gpu_retired};
 #endif
 #if VANTAGE_WIFI
 static Sdio sdio;
@@ -37,7 +52,8 @@ void pi4_drivers_start(void) {
     void* table = (void*)(uintptr_t)mm_alloc_pages(V3D_TABLE_BYTES / 4096, 16);
     void* arena = (void*)(uintptr_t)mm_alloc_pages(V3D_ARENA_BYTES / 4096, 1);
     int gpu_result = table && arena ? v3d_init(&gpu, pi4_hardware_ops(), table, arena, 800, 480) : HW_NO_SPACE;
-    if (gpu_result == HW_OK && (!v3d_self_test(&gpu) || !fb_enable_v3d(&gpu))) gpu_result = HW_IO;
+    if (gpu_result == HW_OK && v3d_self_test(&gpu)) gpu_backend.surface = v3d_pixels(&gpu, 0);
+    if (gpu_result == HW_OK && !fb_attach_backend(&gpu_backend)) gpu_result = HW_IO;
     if (gpu_result == HW_OK)
         uart_writeText("[OK] V3D clear/copy pixel self-test passed; full-canvas clears use V3D\n");
     else report("[ERR] V3D unavailable; CPU rendering retained (", gpu_result);

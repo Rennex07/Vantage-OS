@@ -43,6 +43,9 @@ vantage_native_test(hardware_test hardware_mailbox drivers
   drivers/hardware.c "${ROOT}/drivers/hw/wait.c" "${ROOT}/drivers/hw/property.c")
 vantage_native_test(v3d_test v3d_commands_and_mmu drivers
   drivers/v3d.c "${ROOT}/drivers/video/v3d.c" "${ROOT}/drivers/hw/wait.c")
+vantage_native_test(render_test render_backends drivers
+  ui/render.c "${ROOT}/kernel/ui/render.c" "${ROOT}/kernel/ui/raster.c"
+  "${ROOT}/kernel/parallel/worker.c")
 vantage_native_test(wifi_test wifi_firmware_and_frames drivers
   drivers/wifi.c "${ROOT}/drivers/wifi/cyw43455.c" "${ROOT}/drivers/wifi/nvram.c")
 vantage_native_test(sdio_test sdio_host drivers
