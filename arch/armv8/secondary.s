@@ -89,6 +89,9 @@ secondary_entry:
     msr cptr_el2, x0
     mov x0, #(1 << 31)
     msr hcr_el2, x0
+    mov x0, #3
+    msr cnthctl_el2, x0
+    msr cntvoff_el2, xzr
     ldr x0, =0x30D00800
     msr sctlr_el1, x0
     mov x0, #0x3c5
@@ -128,6 +131,9 @@ secondary_entry:
 .Ljoin_workers:
     dsb sy
     bl mmu_enable_shared
+    /* Without its timer interrupt this core could not preempt user code. */
+    bl irq_init_core
+    cbz w0, .Lpark
     mov w0, w19
     bl parallel_worker_entry
 .Lpark:

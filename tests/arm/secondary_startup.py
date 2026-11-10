@@ -80,6 +80,7 @@ class Execution:
             register, source = ins.op_str.split(", ")
             if register not in ("daifset", "spsel", "cptr_el2", "hcr_el2", "sctlr_el1",
                                  "spsr_el2", "elr_el2", "cpacr_el1", "vbar_el1",
+                                 "cnthctl_el2", "cntvoff_el2",
                                  "mair_el1", "tcr_el1", "ttbr0_el1"):
                 raise AssertionError("Unexpected privileged write: " + register)
             value = int(source[1:], 0) if source.startswith("#") else u.reg_read(
@@ -189,9 +190,15 @@ class StartupTests(unittest.TestCase):
                     self.assertEqual(execution.system["currentel"], 4)
                     self.assertEqual(execution.system["vbar_el1"], IMAGE.symbols["vector_table"])
                     self.assertEqual(execution.system["cpacr_el1"], 3 << 20)
+                    if el == 8:
+                        # EL1 must own the timers before the kernel arms one.
+                        self.assertEqual(execution.system["cnthctl_el2"], 3)
+                        self.assertEqual(execution.system["cntvoff_el2"], 0)
+                    else:
+                        self.assertNotIn("cnthctl_el2", execution.system)
 
-    def test_workers_wait_for_gate_then_enable_mmu_before_c(self):
-        for core in (1, 2, 3):
+    def test_workers_wait_for_gate_then_enable_mmu_and_interrupts_before_c(self):
+        for core, interrupts in ((1, 1), (2, 1), (3, 1), (2, 0)):
             execution = self.worker(core)
             u = execution.u
             called = []
@@ -199,6 +206,11 @@ class StartupTests(unittest.TestCase):
             def callback(ins):
                 if ins.address == IMAGE.symbols["mmu_enable_shared"]:
                     called.append("mmu")
+                    u.reg_write(regs.UC_ARM64_REG_PC, u.reg_read(regs.UC_ARM64_REG_X30))
+                    return True
+                if ins.address == IMAGE.symbols["irq_init_core"]:
+                    called.append("irq")
+                    u.reg_write(regs.UC_ARM64_REG_X0, interrupts)
                     u.reg_write(regs.UC_ARM64_REG_PC, u.reg_read(regs.UC_ARM64_REG_X30))
                     return True
                 if ins.address == IMAGE.symbols["parallel_worker_entry"]:
@@ -211,7 +223,8 @@ class StartupTests(unittest.TestCase):
             execution.callback = callback
             u.mem_write(IMAGE.symbols["secondary_mmu_ready"], struct.pack("<I", 1))
             u.emu_start(u.reg_read(regs.UC_ARM64_REG_PC) + 4, RETURN, count=1000)
-            self.assertEqual(called, ["mmu", "worker"])
+            # A core without its timer interrupt must never run tasks.
+            self.assertEqual(called, ["mmu", "irq", "worker"] if interrupts else ["mmu", "irq"])
 
     def test_shared_mmu_registers_and_gate_publication(self):
         execution = Execution(IMAGE)

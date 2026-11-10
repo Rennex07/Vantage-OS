@@ -1,13 +1,16 @@
 # Explicit production manifest: adding a source file does not silently link it.
 # Legacy examples and host test doubles must never enter the kernel image.
 ARCH_C_SOURCES := \
+    arch/armv8/irq.c \
     arch/armv8/mmu.c \
     arch/armv8/mmu_tables.c \
     arch/armv8/parallel_port.c \
-    arch/armv8/task_port.c
+    arch/armv8/task_port.c \
+    arch/armv8/trap.c
 
 ARCH_ASM_SOURCES := \
     arch/armv8/boot.s \
+    arch/armv8/exception.s \
     arch/armv8/secondary.s \
     arch/armv8/task_context.s
 

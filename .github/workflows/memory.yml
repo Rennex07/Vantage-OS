@@ -36,7 +36,7 @@ jobs:
       - name: Build default kernel and test linked paths
         run: |
           make BUILD_DIR="$RUNNER_TEMP/arm" -j2
-          for suite in memory_management secondary_startup terminal tasks task_smp files pi4_drivers storage file_storage; do
+          for suite in memory_management secondary_startup interrupts terminal tasks task_smp files pi4_drivers storage file_storage; do
             python "tests/arm/$suite.py" "$RUNNER_TEMP/arm/kernel8.elf" -v
           done
       - name: Build opt-in GPU path

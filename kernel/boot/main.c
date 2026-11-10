@@ -1,5 +1,6 @@
 #include <vantage/kernel/window_manager.h>
 #include <vantage/arch/mmu.h>
+#include <vantage/arch/irq.h>
 #include <vantage/kernel/parallel.h>
 #include <vantage/kernel/memory.h>
 #include <vantage/kernel/task.h>
@@ -42,7 +43,9 @@ void main(uintptr_t dtb) {
         }
     }
     env_Init(480, 800);
-    if (!mmu_is_enabled() || !parallel_init() || !parallel_self_test())
+    if (!mmu_is_enabled() || !irq_init_core())
+        mm_halt("[ERR] GIC timer interrupt unavailable; boot halted\n");
+    if (!parallel_init() || !parallel_self_test())
         parallel_halt("[ERR] Four-core parallel initialization failed; boot halted\n");
     uart_writeText("[OK] Four-core parallel self-test passed\n");
     pi4_drivers_start();
