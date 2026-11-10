@@ -103,6 +103,7 @@ class CpuMachine(Machine):
         self.completed = []        # (core, EOIR value)
         self.maintenance = []      # (core, mnemonic, operand, register value)
         self.syscalls = []         # (core, ASID of the caller, number, argument)
+        self.expired_syscalls = [] # (core, number) of calls entered after the slice had expired
         self.gic_group0 = False
         self.clock_us = 0
         self.lock_version = 0
@@ -193,6 +194,8 @@ class CpuMachine(Machine):
     def syscall(self, uc, address, size, _):
         asid = uc.reg_read(regs.UC_ARM64_REG_TTBR0_EL1) >> 48
         self.syscalls.append((self.core, asid, uc.reg_read(X[0]), uc.reg_read(X[1])))
+        if self.cpu.armed and self.cpu.remaining <= 0:
+            self.expired_syscalls.append((self.core, uc.reg_read(X[0])))
 
     def halted(self, uc, address, size, _):
         pointer = uc.reg_read(regs.UC_ARM64_REG_X0)

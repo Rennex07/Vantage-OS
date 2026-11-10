@@ -78,7 +78,7 @@ class PreemptionTests(unittest.TestCase):
     def setUp(self):
         m = self.m
         m.slice_instructions = 400
-        del m.entries[:], m.interrupted[:], m.completed[:], m.syscalls[:]
+        del m.entries[:], m.interrupted[:], m.completed[:], m.syscalls[:], m.expired_syscalls[:]
         for cpu in m.cores:
             del cpu.timer_log[:]
 
@@ -183,7 +183,10 @@ class PreemptionTests(unittest.TestCase):
         self.assertEqual(m.run_all(), OK)
         # The kernel itself is never interrupted: the tick waits for the return.
         self.check_interrupts(origins={0})
-        self.assertIn(p.address('after'), {pc for *_, pc in m.interrupted})
+        # Calls ran to completion while their slice had already expired. Where the model
+        # samples the pending tick depends on its chunking, so only EL0 is asserted.
+        self.assertIn(12, [number for _, number in m.expired_syscalls])
+        self.assertTrue(all(pc in range(USER_BASE, USER_BASE + PAGE) for *_, pc in m.interrupted))
         self.assertEqual(m.reap(process), (OK, 5))
         self.assertEqual(m.reap(peer), (OK, 0x51))
 
