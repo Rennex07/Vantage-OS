@@ -1,5 +1,7 @@
-# Hardware features remain opt-in. These names are part of the build interface.
-V3D ?= 0
+# These names are part of the build interface. V3D is probed at boot by
+# default and falls back to CPU rendering; V3D=0 builds the CPU renderer only.
+# The other hardware features remain opt-in.
+V3D ?= 1
 WIFI ?= 0
 STORAGE_VALIDATION ?= 0
 SD_BASE_CLOCK_HZ ?= 0
