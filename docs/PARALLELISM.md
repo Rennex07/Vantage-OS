@@ -11,8 +11,8 @@ The worker facility also hosts the preemptive four-core task and process
 scheduler. During task sessions, synchronous raster batches reserve idle
 workers or use their serial fallback rather than wait on occupied task cores.
 Batch slices run with interrupts masked and are never preempted. See
-[SCHEDULER.md](SCHEDULER.md). This is not a GPU
-renderer. The original core-1 startup
+[SCHEDULER.md](SCHEDULER.md). This worker facility is the CPU
+renderer; the default V3D backend is described below. The original core-1 startup
 was reported working on hardware by the maintainer; the new worker system
 still needs Pi 4 runtime and cache-coherency validation.
 
@@ -33,29 +33,45 @@ Acceptance: repeated Pi cold boots and sustained parallel correctness tests,
 with commit/image hashes and full logs. Desktop threads or mocked ARM tests
 must be labelled separately from hardware results.
 
-## GPU: existing display versus acceleration
+## GPU: V3D backend and the CPU renderer
 
-An experimental V3D 4.2 clear/copy driver now provides private GPU mappings,
-bounded command submission and an opt-in pixel self-test. See the
-[hardware driver guide](HARDWARE.md). Physical Pi validation remains pending;
-the default renderer still runs on the CPU.
+V3D 4.2 is the default rendering backend of the Pi 4 image. Full-surface
+clears and presents run as V3D jobs; every other operation is CPU raster on
+the same surface. Bring-up, memory ownership, synchronization and fallback
+rules are in the [hardware driver guide](HARDWARE.md). It is validated against
+host models and Unicorn only: physical Pi validation is pending and no
+speedup is claimed.
 
-`platform/pi4/display.c` already requests a framebuffer and virtual-offset
-changes from VideoCore firmware through the property mailbox. Drawing and
-framebuffer copying run on the ARM CPU. VideoCore-backed display output does
-not establish that V3D renders any shapes or executes compute jobs.
+The four-way CPU raster stays fully functional. It is the whole renderer in
+`V3D=0` images, after a failed boot probe and after a runtime GPU failure, and
+it draws partial fills in every configuration. Ordering rules:
+
+- Core 0 owns the display. A V3D job is submitted and completed inside one
+  call on core 0 with exceptions masked; a raster batch joins its workers
+  before `parallel_run` returns. The two never overlap on a surface, and no
+  job is submitted from a batch callback.
+- Worker reservation is unchanged: during a task session a batch reserves
+  idle workers or runs its serial slice. V3D jobs do not use workers and do
+  not wait on task cores.
+- A V3D timeout or fault stops the device, moves the frame to the CPU back
+  buffer and repeats the operation on the CPU, so the frame stays correct.
+- With timer preemption, each renderer call, including its V3D job or raster
+  batch, must stay non-preemptible and must not be re-entered.
+
+`platform/pi4/display.c` still requests the framebuffer and page flips from
+VideoCore firmware through the property mailbox. VideoCore-backed display
+output does not establish that V3D rendered anything; the boot self-test and
+the UART backend message report that, so far only against software models.
 
 The Pi 4 uses V3D 4.2. Mesa and Linux implement separate rendering and display
-drivers; enabling a V3D clock is not a replacement for buffer ownership, GPU
-page tables, command submission, completion/error handling and valid shader
-code. A V3D driver is a separate project, not part of secondary-core startup.
+drivers; this driver covers only the buffer ownership, GPU page tables,
+command submission and completion/error handling needed for 2D clear and
+present. It has no shader code. Do not use old VC4 QPU tutorials as proof of
+Pi 4 compatibility.
 
-Recommended first GPU milestone, if pursued: identify the hardware and its
-power/clock requirements, reserve explicitly owned buffers, and execute one
-bounded off-screen render with a checked pixel result before connecting it to
-display presentation. Establish timeout/recovery behavior before submitting
-arbitrary workloads. Keep the existing CPU renderer usable for comparison.
-Do not use old VC4 QPU tutorials as proof of Pi 4 compatibility.
+Next GPU steps: complete the physical acceptance checklist in the hardware
+guide, compare pixels and frame times with a `V3D=0` image, and only then
+consider moving further operations to the device.
 
 References:
 

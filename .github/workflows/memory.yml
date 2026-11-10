@@ -33,15 +33,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           python -m pip install unicorn==2.1.4 capstone==5.0.7
-      - name: Build default kernel and test linked paths
+      - name: Build default (V3D) and forced-CPU kernels and test linked paths
+        # V3D=0 removes the boot-time GPU probe; both images must pass every suite.
         run: |
           make BUILD_DIR="$RUNNER_TEMP/arm" -j2
-          for suite in memory_management secondary_startup interrupts processes preemption terminal tasks task_smp files pi4_drivers storage file_storage; do
-            python "tests/arm/$suite.py" "$RUNNER_TEMP/arm/kernel8.elf" -v
+          make BUILD_DIR="$RUNNER_TEMP/cpu" V3D=0 -j2
+          for build in arm cpu; do
+            for suite in memory_management secondary_startup interrupts processes preemption terminal tasks task_smp files pi4_drivers storage file_storage; do
+              python "tests/arm/$suite.py" "$RUNNER_TEMP/$build/kernel8.elf" -v
+            done
           done
-      - name: Build opt-in GPU path
-        run: make BUILD_DIR="$RUNNER_TEMP/v3d" V3D=1 -j2
-      - name: Compile combined GPU and Wi-Fi path with synthetic assets
+      - name: Boot both kernels against working, absent and failing V3D models
+        run: |
+          python tests/arm/v3d_boot.py "$RUNNER_TEMP/arm/kernel8.elf" \
+            "$RUNNER_TEMP/cpu/kernel8.elf" -v
+      - name: Compile default GPU and Wi-Fi path with synthetic assets
         # Compile-only fixture: these bytes are not usable radio firmware.
         run: |
           mkdir -p "$RUNNER_TEMP/wifi"
@@ -56,7 +62,7 @@ jobs:
           python tools/embed_wifi.py --firmware "$RUNNER_TEMP/wifi/firmware.bin" \
             --nvram "$RUNNER_TEMP/wifi/nvram.txt" --clm "$RUNNER_TEMP/wifi/clm.bin" \
             --country GB --regrev 0 --output "$RUNNER_TEMP/wifi/assets.c"
-          make BUILD_DIR="$RUNNER_TEMP/wifi-arm" V3D=1 WIFI=1 \
+          make BUILD_DIR="$RUNNER_TEMP/wifi-arm" WIFI=1 \
             WIFI_FIRMWARE_C="$RUNNER_TEMP/wifi/assets.c" -j2
       - name: Verify storage boot gate and option-sensitive rebuilding
         run: |

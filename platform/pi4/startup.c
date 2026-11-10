@@ -2,6 +2,7 @@
 #include <vantage/drivers/v3d.h>
 #include <vantage/platform/pi4/display.h>
 #include <vantage/kernel/memory.h>
+#include <vantage/kernel/render.h>
 #include <vantage/platform/pi4/io.h>
 
 #ifndef VANTAGE_V3D
@@ -11,9 +12,6 @@
 #define VANTAGE_WIFI 0
 #endif
 
-#if VANTAGE_V3D
-static V3d gpu;
-#endif
 #if VANTAGE_WIFI
 static Sdio sdio;
 static Wifi wifi;
@@ -32,17 +30,75 @@ static void report(const char* prefix, int error) {
 }
 #endif
 
+#if VANTAGE_V3D
+static V3d gpu;
+static RenderBackend gpu_backend;
+/* Page runs lent to the driver. They are freed once the device is confirmed
+ * unable to reach them and stay reserved until reboot otherwise. */
+static void* gpu_table;
+static void* gpu_arena;
+
+static void gpu_release(void) {
+    if (gpu.state == V3D_QUARANTINED) {
+        uart_writeText("[WARN] V3D stop unconfirmed; its 6 MiB of buffers stay reserved until reboot\n");
+        return;
+    }
+    if (gpu_table) mm_free_pages((uintptr_t)gpu_table, V3D_TABLE_BYTES / 4096);
+    if (gpu_arena) mm_free_pages((uintptr_t)gpu_arena, V3D_ARENA_BYTES / 4096);
+    gpu_table = gpu_arena = NULL;
+}
+
+static void gpu_failure(const char* prefix) {
+    uart_writeText(prefix);
+    uart_writeText(v3d_stage_name(gpu.stage));
+    report(" (", gpu.error);
+    if (gpu.detail) {
+        uart_writeText("[INFO] V3D_ERR_STAT ");
+        uart_writeHex(gpu.detail);
+        uart_writeText("\n");
+    }
+}
+
+/* The renderer has already moved the frame to the CPU surface. */
+static void gpu_retired(void* context) {
+    (void)context;
+    gpu_failure("[ERR] V3D stopped during ");
+    gpu_release();
+    uart_writeText("[INFO] CPU rendering backend selected; current frame kept\n");
+}
+
+static void gpu_start(void) {
+    gpu_table = (void*)(uintptr_t)mm_alloc_pages(V3D_TABLE_BYTES / 4096, 16);
+    gpu_arena = (void*)(uintptr_t)mm_alloc_pages(V3D_ARENA_BYTES / 4096, 1);
+    int result = gpu_table && gpu_arena
+        ? v3d_init(&gpu, pi4_hardware_ops(), gpu_table, gpu_arena, 800, 480) : HW_NO_SPACE;
+    if (result == HW_OK) result = v3d_self_test(&gpu, fb_hidden_page());
+    if (result == HW_OK) {
+        v3d_render_backend(&gpu, &gpu_backend);
+        gpu_backend.retired = gpu_retired;
+        if (!fb_attach_backend(&gpu_backend)) {
+            (void)v3d_stop(&gpu);
+            result = HW_BUSY;
+        }
+    }
+    if (result == HW_OK) {
+        uart_writeText(gpu.present
+            ? "[OK] V3D self-test passed; V3D backend selected (clear, present)\n"
+            : "[OK] V3D self-test passed; V3D backend selected (clear; CPU present)\n");
+        return;
+    }
+    if (gpu.stage) gpu_failure("[ERR] V3D unavailable: ");
+    else report("[ERR] V3D unavailable (", result);
+    gpu_release();
+    uart_writeText("[INFO] CPU rendering backend selected\n");
+}
+#endif
+
 void pi4_drivers_start(void) {
 #if VANTAGE_V3D
-    void* table = (void*)(uintptr_t)mm_alloc_pages(V3D_TABLE_BYTES / 4096, 16);
-    void* arena = (void*)(uintptr_t)mm_alloc_pages(V3D_ARENA_BYTES / 4096, 1);
-    int gpu_result = table && arena ? v3d_init(&gpu, pi4_hardware_ops(), table, arena, 800, 480) : HW_NO_SPACE;
-    if (gpu_result == HW_OK && (!v3d_self_test(&gpu) || !fb_enable_v3d(&gpu))) gpu_result = HW_IO;
-    if (gpu_result == HW_OK)
-        uart_writeText("[OK] V3D clear/copy pixel self-test passed; full-canvas clears use V3D\n");
-    else report("[ERR] V3D unavailable; CPU rendering retained (", gpu_result);
-    /* These page runs remain allocated even on failure: the device might still
-     * reference them. Reclaiming them requires a hardware-validated reset path. */
+    gpu_start();
+#else
+    uart_writeText("[INFO] V3D disabled at build time (V3D=0); CPU rendering backend selected\n");
 #endif
 #if VANTAGE_WIFI
     int wifi_result = sdio_init(&sdio, pi4_hardware_ops());

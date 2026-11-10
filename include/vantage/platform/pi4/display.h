@@ -20,5 +20,10 @@ void put_pixel(uint32_t x, uint32_t y, uint32_t color);
 void fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
 void fb_wait_frame(void);
 void fb_swap(void);
-struct V3d;
-uint32_t fb_enable_v3d(struct V3d* gpu);
+struct RenderBackend;
+/* After fb_init, core 0. Moves the current frame onto the backend's surface;
+ * the backend object must stay valid until it reports retirement. */
+uint32_t fb_attach_backend(const struct RenderBackend* backend);
+/* The off-screen page the next fb_swap overwrites, for a backend self-test
+ * that may clobber it. NULL when the firmware pitch has row padding. */
+void* fb_hidden_page(void);

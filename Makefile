@@ -23,7 +23,7 @@ STRICT_SOURCES := $(MEMORY_SOURCES) $(FILESYSTEM_SOURCES) $(SCHEDULER_SOURCES) \
     $(DRIVER_SOURCES) platform/pi4/hardware.c platform/pi4/startup.c \
     platform/pi4/sd.c platform/pi4/storage.c arch/armv8/task_port.c \
     arch/armv8/irq.c arch/armv8/trap.c arch/armv8/address_space.c \
-    kernel/boot/main.c kernel/syscall/dispatch.c
+    kernel/boot/main.c kernel/syscall/dispatch.c kernel/ui/render.c
 $(patsubst %.c,$(BUILD_DIR)/%.o,$(STRICT_SOURCES)): CFLAGS += -Wextra -Werror
 $(BUILD_DIR)/lib/memory.o: CFLAGS += -fno-tree-loop-distribute-patterns
 $(BUILD_DIR)/arch/armv8/task_port.o: CFLAGS += -mno-outline-atomics

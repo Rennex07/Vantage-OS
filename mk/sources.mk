@@ -37,6 +37,7 @@ SCHEDULER_SOURCES := \
 UI_SOURCES := \
     kernel/ui/canvas.c \
     kernel/ui/raster.c \
+    kernel/ui/render.c \
     kernel/ui/window_manager.c
 
 DRIVER_SOURCES := \

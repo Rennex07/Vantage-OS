@@ -6,9 +6,8 @@
 
 #include <vantage/platform/pi4/display.h>
 #include <vantage/arch/mmu.h>
-#include <vantage/kernel/raster.h>
+#include <vantage/kernel/render.h>
 #include <vantage/kernel/memory.h>
-#include <vantage/drivers/v3d.h>
 
 #include <vantage/platform/pi4/io.h>
 
@@ -16,10 +15,7 @@ static volatile uint32_t mbox[36] __attribute__((aligned(64)));
 
 static uint32_t* fbBase;
 static uint32_t fbPitch;
-static uint32_t fbWidth;
 
-static uint32_t* drawBase;
-static uint32_t backPitch;
 static uint32_t pageHeight;
 static uint32_t drawPage;
 static uint32_t lastSwap;
@@ -28,27 +24,19 @@ static uint32_t lastSwap;
 #define BACK_PIXELS (800 * 480)
 #define FRAME_US 16667
 
+/* CPU-owned draw surface. It stays allocated while an accelerated backend
+ * draws into its own surface, so a runtime fallback never has to allocate. */
 static uint32_t* backBuffer;
-static uint32_t* cpuBackBuffer;
-static V3d* acceleration;
+static Renderer renderer;
 
-static void check_acceleration(void) {
-    if (acceleration && acceleration->state != 1) {
-        backBuffer = drawBase = cpuBackBuffer;
-        acceleration = NULL;
-        uart_writeText("[ERR] V3D stopped; CPU rendering resumed\n");
-    }
+uint32_t fb_attach_backend(const RenderBackend* backend) {
+    if (!backBuffer || !backend) return 0;
+    return render_attach(&renderer, backend);
 }
 
-uint32_t fb_enable_v3d(V3d* gpu) {
-    if (!backBuffer || acceleration || !gpu || gpu->width != fbWidth || gpu->height != pageHeight) return 0;
-    uint32_t* pixels = v3d_pixels(gpu, 0);
-    if (!pixels) return 0;
-    memcpy(pixels, backBuffer, (size_t)backPitch * pageHeight);
-    cpuBackBuffer = backBuffer;
-    backBuffer = drawBase = pixels;
-    acceleration = gpu;
-    return 1;
+void* fb_hidden_page(void) {
+    if (!backBuffer || fbPitch != renderer.width * 4) return NULL;
+    return (void*)((uintptr_t)fbBase + drawPage * pageHeight * fbPitch);
 }
 
 static void cache_flush(volatile void* addr, uint32_t size) {
@@ -144,8 +132,6 @@ uint32_t* fb_init(uint32_t width, uint32_t height) {
 
     fbBase = (uint32_t*)(uintptr_t)(mbox[28] & 0x3FFFFFFF);
     fbPitch = mbox[33];
-    fbWidth = width;
-    backPitch = width * 4;
     pageHeight = height;
     drawPage = 1;
     lastSwap = time_us();
@@ -159,41 +145,18 @@ uint32_t* fb_init(uint32_t width, uint32_t height) {
     /* Keep the old capacity used by the panel's fixed coordinate transform. */
     backBuffer = mm_zalloc((uint64_t)BACK_PIXELS * sizeof(uint32_t), 64);
     if (!backBuffer) mm_halt("[ERR] Back-buffer allocation failed\n");
-    drawBase = backBuffer;
+    render_init(&renderer, backBuffer, width, height);
 
     uart_writeText("[OK] Vantage display driver...\n");
     return fbBase;
 }
 
 void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
-    check_acceleration();
-    uint32_t phys_x = y;
-    uint32_t phys_y = 480 - 1 - x;
-
-    volatile uint32_t* px = (volatile uint32_t*)((uintptr_t)drawBase + phys_y * backPitch + phys_x * 4);
-    *px = color;
+    render_pixel(&renderer, y, 480 - 1 - x, color);
 }
 
 void fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
-    check_acceleration();
-    uint32_t px = y;
-    uint32_t py = 480 - x - w;
-    uint32_t pw = h;
-    uint32_t ph = w;
-
-    if (acceleration && !px && !py && pw == fbWidth && ph == pageHeight) {
-        if (v3d_clear(acceleration, 0, color) == HW_OK) return;
-        /* Failed GPU pages remain quarantined. Repaint a separate CPU buffer
-         * without reading the potentially still device-owned surface. */
-        check_acceleration();
-    }
-
-    RasterFill fill = { drawBase, backPitch / 4, px, py, pw, ph, color };
-    /* Keep tiny spans local; full-canvas clears use all four cores. */
-    if (ph >= PARALLEL_CORES && (uint64_t)pw * ph >= 4096) {
-        if (!parallel_run(raster_fill_rows, &fill))
-            parallel_halt("[ERR] Parallel fill submission failed; system halted\n");
-    } else raster_fill_rows(0, 1, &fill);
+    render_fill(&renderer, y, 480 - x - w, h, w, color);
 }
 
 void fb_wait_frame(void) {
@@ -202,13 +165,9 @@ void fb_wait_frame(void) {
 }
 
 void fb_swap(void) {
-    check_acceleration();
     uintptr_t page = (uintptr_t)fbBase + drawPage * pageHeight * fbPitch;
 
-    RasterCopy copy = { backBuffer, (volatile uint32_t*)page,
-                        backPitch / 4, fbPitch / 4, fbWidth, pageHeight };
-    if (!parallel_run(raster_copy_rows, &copy))
-        parallel_halt("[ERR] Parallel frame copy failed; system halted\n");
+    render_present(&renderer, (volatile uint32_t*)page, fbPitch / 4);
 
     __asm__ volatile("dsb sy" ::: "memory");
 

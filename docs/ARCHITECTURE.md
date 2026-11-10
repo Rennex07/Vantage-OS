@@ -23,12 +23,12 @@ kernel/
   parallel/           Synchronous multicore worker coordination
   sched/              Preemptive task scheduling and the process lifecycle
   syscall/            Common validated syscall dispatcher
-  ui/                 Canvas, row rasterization and window geometry
+  ui/                 Canvas, render backend seam, row rasterization and window geometry
 drivers/
   hw/                 Bounded hardware polling and property-mailbox transactions
   input/              Touch and serial-key event decoding
   storage/            Portable SD command/state engine
-  video/              V3D command engine and licensed generated font assets
+  video/              V3D engine and render backend, licensed generated font assets
   wifi/               SDIO/CYW43455 protocol and firmware transport
 platform/pi4/         MMIO, clocks, display, SD and storage adapters, driver startup
 lib/                  Canonical freestanding memory primitives
@@ -41,7 +41,7 @@ sim/
   tests/              SDL integration and concurrent raster tests
 tests/
   native/             Headless driver, filesystem, memory, scheduler and ABI tests
-  support/            Shared test fixtures
+  support/            Shared test fixtures and device models
   arm/                Linked AArch64 execution/model regressions
   tools/              Image, firmware, configuration and layout-tool tests
 mk/                   Hardware feature options and explicit production manifest
@@ -71,6 +71,10 @@ legacy/               Retained historical examples, excluded from production
 - Portable command engines receive callbacks (`HwOps`, `SdIo`, `SectorDevice`).
   The Pi backend owns MMIO/cache maintenance and the host backend owns files/SDL.
   Device-specific register maps inside protocol drivers are intentional.
+- `include/vantage/kernel/render.h` is the only seam between the display layer
+  and its renderers. `platform/pi4/startup.c` selects the V3D backend at
+  runtime after its self-test; canvas and display code never call the V3D
+  engine directly, and CPU raster stays available behind the same seam.
 - The scheduler and parallel ports describe architecture seams, not userspace
   APIs. Module-local globals retain their current single-owner/locking contracts.
 - `lib/memory.c` is the production implementation of `memcpy`, `memset`, and
@@ -90,12 +94,16 @@ Hardware continues to use GNU Make and the existing feature flags:
 
 ```sh
 make BUILD_DIR=out/pi4
-make BUILD_DIR=out/v3d V3D=1
+make BUILD_DIR=out/cpu V3D=0
 ```
+
+The default image probes V3D at boot and falls back to CPU rendering;
+`V3D=0` builds the CPU renderer only. Wi-Fi and storage validation remain
+opt-in.
 
 The output remains `<BUILD_DIR>/prod/kernel8.img` with a linked
 `<BUILD_DIR>/kernel8.elf`. The terminal program is linked first as
-`<BUILD_DIR>/user/terminal.elf` and embedded as `user/terminal.bin`. `mk/config.mk` validates opt-in switches;
+`<BUILD_DIR>/user/terminal.elf` and embedded as `user/terminal.bin`. `mk/config.mk` validates the build switches;
 `mk/sources.mk` explicitly lists production sources. Add each new `.c`/`.s` there
 exactly once. Do not restore recursive wildcards: they can accidentally link
 test doubles, alternate runtimes or incomplete examples. Configuration stamps
@@ -150,8 +158,8 @@ function names and on-disk encodings remain unchanged.
    host warning policy in `cmake/VantageHost.cmake`.
 4. Preserve syscall IDs, error values, payload layout, on-disk encoding, linker
    sections and assembly entry symbols unless explicitly changing that contract.
-5. Run the affected native tests and linked ARM regressions. Exercise default
-   and opt-in builds when changing hardware startup or configuration.
+5. Run the affected native tests and linked ARM regressions. Exercise default,
+   `V3D=0` and opt-in builds when changing hardware startup or configuration.
 6. Update the subsystem guide and keep licensed/generated assets tied to their
    generators and applicable notices. Hardware acceptance still needs Pi logs.
 

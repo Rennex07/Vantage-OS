@@ -128,7 +128,9 @@ Large physical rectangle fills and framebuffer copies partition rows across
 all four cores. Small spans stay local. Jobs receive immutable geometry/color
 snapshots rather than modifying shared canvas state. Input, UART, mailbox
 requests and page flips stay on core 0, after all row writes complete. These
-are CPU operations, not GPU-accelerated rendering. The desktop application
+are the CPU renderer. On the default Pi image, full-surface clears and
+presents go to the V3D backend first and use these paths as its fallback;
+smaller fills always use them. The desktop application
 renderer remains unchanged; separate SDL-thread tests execute the real batch
 dispatcher and raster callbacks concurrently.
 
@@ -322,10 +324,13 @@ queued mouse transitions across reads.
 
 ## Drawing UI
 
-Optional Pi 4 V3D clear/copy and CYW43455 Ethernet transport are documented in
-[the hardware driver guide](HARDWARE.md). Both are experimental and disabled at
-boot by default. The V3D option accelerates full-canvas clears only after its
-pixel self-test; normal shapes and presentation still use the CPU path.
+The Pi 4 image draws through `include/vantage/kernel/render.h`. V3D 4.2 is the
+default backend for full-canvas clears and presentation once its boot
+self-test passes; other shapes are CPU raster on the same surface, and any
+V3D failure falls back to the CPU renderer without losing the frame. Build
+with `V3D=0` for the CPU renderer only. This is validated against software
+models, not yet on a physical Pi. V3D and the opt-in CYW43455 Ethernet
+transport are documented in [the hardware driver guide](HARDWARE.md).
 
 `include/vantage/kernel/canvas.h` is the privileged drawing API, portable across both
 builds. Its bounded `canvas_text_row` API draws 8x16 ASCII cells using a
