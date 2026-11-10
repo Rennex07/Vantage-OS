@@ -43,15 +43,20 @@ stack writes. Whole RAM holes and blocks overlapping `no-map` are
 left invalid; allocation excludes all reservations. Allocator calls are restricted
 to masked EL1 execution on core 0, with workers using caller-owned buffers.
 
-The linker places the user stack in a separate, 2 MiB-aligned `.user.bss`
-region. Only that data region is writable from EL0. Kernel data, page tables,
-the privileged stack, the framebuffer and peripheral registers are EL1-only.
-The existing shared code region remains read-only and executable in both modes.
+User programs do not share the kernel's mappings. Every kernel block is
+EL1-only: kernel text is read-only and the only memory executable at EL1, and
+kernel data, page tables, stacks, the framebuffer and peripheral registers are
+neither accessible nor executable from EL0. Each process has its own
+translation tables for a separate user range above the 4 GiB identity map,
+with read/execute text, read-only constants, and read/write data, bss and
+stacks. See [the scheduler guide](SCHEDULER.md#address-spaces).
 
-Pointer-taking syscalls check alignment and the complete buffer range before
-accessing it. Rejected buffers return 0 without reading input or drawing.
-The native `user_memory` test checks page-table permissions and the syscall
-dispatcher with bounded test memory; it does not emulate ARM access faults.
+Pointer-taking syscalls check alignment, then resolve the complete buffer
+through the calling process's tables and copy it to or from the kernel stack.
+Misaligned buffers return 0 without reading input or drawing. A buffer the
+process may not access terminates that process. The native `user_memory` test
+checks the kernel mapping permissions and the syscall dispatcher with bounded
+host memory; ARM permission enforcement is tested by `tests/arm/processes.py`.
 
 ## Pi 4 four-core startup
 
@@ -115,8 +120,9 @@ and executes slice 0 itself. Workers acquire their sequence, run their slice,
 complete outstanding writes, then release completion. Core 0 acquires every
 completion before returning. Contexts may live on its stack because the call
 joins all work. A completion timeout halts without returning or reusing that
-context. Nested submissions and submissions from a worker are rejected. No
-dynamic queue, work stealing, task migration or preemption is implemented.
+context. Nested submissions and submissions from a worker are rejected. The
+batch facility has no dynamic queue or work stealing, and a batch slice is
+never preempted; task scheduling is described below.
 
 Large physical rectangle fills and framebuffer copies partition rows across
 all four cores. Small spans stay local. Jobs receive immutable geometry/color
@@ -157,90 +163,71 @@ delivery are mocked; it does not test firmware, cache coherence or concurrent ha
 For remaining worker validation, GPU and process-management stages, see the
 [parallelism roadmap](PARALLELISM.md).
 
-## Cooperative tasks
+## Tasks, processes and preemption
 
-`kernel/sched/` implements cooperative EL1 tasks across all four Pi 4 cores.
-Each core has an independent dispatcher context; a locked runnable table supplies
-eligible tasks in round-robin order. Boot checks two-task progress and simultaneous
-four-core execution, then starts the built-in EL0 app pinned to core 0.
+`kernel/sched/` schedules tasks across all four Pi 4 cores. Each core has an
+independent dispatcher context and timer tick; a locked table supplies
+eligible tasks in round-robin order by immutable affinity. Kernel tasks are
+trusted EL1 code. Processes own an isolated address space and run their
+threads at EL0. [The scheduler guide](SCHEDULER.md) is the contract for
+preemption, locking, the process lifecycle, the address-space layout, service
+ownership and verification; this section is a summary.
 
-`task_init` is one-shot. `task_create` takes a trusted kernel entry and argument;
-the caller keeps the argument alive until exit. It preserves core-0 affinity for
-existing device clients. `task_create_affinity(entry, argument, mask)` allows a
-task on any selected available cores: `TASK_ALL_CORES` uses all four, and `1U << n`
-pins to core n. Affinity is immutable; a movable task can change cores when it
-yields or blocks. Thirty-two fixed slots each have a
-16 KiB privileged stack with a 64-byte diagnostic guard. Task IDs include a
-generation; reaped IDs cannot address a reused slot. Generation exhaustion
-permanently retires the slot rather than wrapping.
-
-Tasks move through runnable, running, blocked and exited states. Yield returns
-to that core's dispatcher. Returning from an entry exits with status zero.
-`task_join` blocks a running task, rejects self/cyclic waits and reserves the
-target for one waiter. `task_reap` is nonblocking and also works from boot; it
-rejects running or waiter-owned targets. Exited stacks remain reserved until
-reaped, after execution has switched away. Join/reap status pointers are trusted
-kernel pointers, not syscall payloads. Core 0 coordinates `task_run`, which waits
-for global quiescence, including remote running/runnable tasks. Blocked-only state
-returns `TASK_PENDING`. `task_info` snapshots state, affinity, current core and
-dispatch count under the scheduler lock. IDs remain opaque; their encoding has
-expanded to accommodate the larger table.
-
-Scheduler lifecycle calls work from masked EL1 on any participating core;
-initialization and dispatch coordination belong to core 0. Drivers and parallel
-jobs must finish before yielding; there is no preemption, timer wakeup or
-interrupt-safe locking. The context switch saves the AAPCS64 callee-saved
-integer registers, SP, lower halves of v8–v15, FPCR/FPSR and the pending
-ELR_EL1/SPSR_EL1/SP_EL0. This is a cooperative call-boundary context, not a full
-interrupt frame. Stack guards detect some corruption; they are not guard pages.
-The scheduler lock stays held across a task-to-dispatcher switch, until the old
-context/stack is fully saved. This prevents early migration and stack reclamation.
-Task data outside the scheduler needs its own synchronization. See
-[the multicore contract](SCHEDULER.md) for examples and acceptance requirements.
+- A 10 ms timer tick (GIC-400, per-core virtual timer) preempts EL0 code at any
+  instruction, and kernel tasks only inside `task_preempt_begin` /
+  `task_preempt_end`. All other kernel code runs with interrupts masked and is
+  never preempted, so drivers, the allocator, storage and `parallel_run` keep
+  their single-owner contracts.
+- Exceptions save a complete frame (all general and SIMD registers, `SP_EL0`,
+  `ELR_EL1`, `SPSR_EL1`, FPCR, FPSR) on the task's kernel stack. A preempted
+  task can resume on any allowed core.
+- `task_create` pins a kernel task to core 0 for device clients;
+  `task_create_affinity` selects cores. Thirty-two slots have 16 KiB privileged
+  stacks with a 64-byte diagnostic guard and generation-tagged IDs. Join, reap
+  and `task_run` behave as before for kernel tasks.
+- `process_create` builds an address space from a program image and starts its
+  first thread; `process_reap` frees everything after the process has exited.
+  Exit, a fault or `process_kill` ends all threads of the process only.
+- The terminal is linked separately at user addresses, embedded in the kernel
+  as a flat image and started as a process pinned to core 0.
 
 Existing file/display/input services are restricted to boot or core-0-pinned
 tasks; movable tasks cannot use them even while temporarily on core 0. File
 syscalls reject unsupported callers with `FILE_UNAVAILABLE`. Synchronous CPU
 raster jobs reserve idle secondary workers against task dispatch and retain
 four-way rendering. If any secondary is occupied by a task, the renderer uses
-its serial fallback on core 0 instead of waiting on a non-yielding task. No
-rendering speedup is claimed.
+its serial fallback on core 0. No rendering speedup is claimed.
 
 | Syscall | ID | Result |
 |---|---|---|
-| `sys_task_id()` | 16 | Current task ID; zero when unavailable |
-| `sys_task_yield()` | 17 | One after resuming; zero when unavailable |
-| `sys_task_exit(status)` | 18 | Does not return on success; zero when unavailable |
+| `sys_task_id()` | 16 | Current thread's task ID |
+| `sys_task_yield()` | 17 | One after resuming |
+| `sys_task_exit(status)` | 18 | Ends the calling process; does not return |
 
-IDs 6–15 are reserved for console extensions. Presentation also yields, after
-the renderer and parallel jobs finish. EL0 return exits through SVC; interrupt
-masks stay set because interrupt delivery is not configured. Task creation and
-join are kernel-only. The desktop app does not emulate scheduling and returns
-zero for these three syscalls.
-
-The shared code and single writable user region are unchanged. These tasks are
-not isolated processes: there are no independent address spaces, user account
-permissions, executable loading or user-fault recovery.
+IDs 6 to 15 are reserved for console extensions. Presentation also yields,
+after the renderer and parallel jobs finish. Creating tasks and processes,
+joining and waiting are kernel-only. The desktop app does not emulate
+scheduling and returns zero for these three syscalls.
 
 ```sh
-python tests/arm/tasks.py /path/to/fresh/kernel8.elf -v
-python tests/arm/task_smp.py /path/to/fresh/kernel8.elf -v
+for suite in interrupts processes preemption tasks task_smp; do
+  python tests/arm/$suite.py /path/to/fresh/kernel8.elf -v
+done
 ```
 
-This executes the linked scheduler, context-switch assembly and SVC wrappers,
-with scripted task bodies and modeled exception delivery. It checks register and
-stack preservation, round-robin progress, cross-core join/exit/reaping and
-migration, stale IDs, ownership checks, damaged guards and return to EL0 after a
-yield. Four CPU contexts share modeled RAM, with explicit per-core exclusive
-reservations. These tests do not validate Pi caches, GIC interrupts or ARM
-memory-permission enforcement. A separate native test uses four OS threads and
-host fibers/ucontext to exercise real host concurrency.
+`tasks.py` and `task_smp.py` run kernel tasks on the scripted machine with
+mocked privileged instructions. `interrupts.py`, `processes.py` and
+`preemption.py` run on a CPU model that executes privilege levels, the
+kernel's translation tables and exception returns natively, with modeled
+exception entry, GIC and timer. Native tests use four OS threads and host
+fibers/ucontext with a simulated tick. None of these validate Pi firmware,
+interrupt delivery, caches or timing.
 
 Before hardware acceptance, record image/commit hashes and serial output across
-cold boots. Expect `[OK] Cooperative task self-test passed` and
-`[OK] Tasks executed concurrently on cores 0, 1, 2 and 3` before app entry.
-Exercise sustained touch/rendering, four-core compute, migration and cross-core
-joins; do not infer hardware compatibility from modeled or host-thread tests.
+cold boots. Expect `[OK] Cooperative task self-test passed`,
+`[OK] Tasks executed concurrently on cores 0, 1, 2 and 3` and
+`[OK] Timer ticks preempted kernel tasks on cores 0, 1, 2 and 3` before app
+entry. Do not infer hardware compatibility from modeled or host-thread tests.
 
 ## Application files
 
@@ -275,10 +262,11 @@ Successful mutations commit synchronously. I/O failures quarantine the mount
 until handles are released and storage is remounted; they are not guaranteed
 to have left the disk unchanged. Corruption and I/O errors are reported explicitly.
 
-Handles include a non-wrapping generation and belong to the current task. Exit
-closes that task's handles but retains named files. Remove rejects files with
-any open handles. The simulator uses one host-app owner. Files share a namespace;
-this ownership check is not user-account permission or process memory isolation.
+Handles include a non-wrapping generation and belong to the calling process
+(or to a kernel task). Exit closes that owner's handles but retains named
+files. Remove rejects files with any open handles. The simulator uses one
+host-app owner. Files share a namespace; handle ownership is not a
+user-account permission.
 
 Requests have no nested pointers. The dispatcher validates the full range and
 alignment, snapshots input on the kernel stack, checks reserved fields and
@@ -316,8 +304,9 @@ ctest --test-dir out/files-host -L storage --output-on-failure
 python tests/arm/files.py /path/to/fresh/kernel8.elf -v
 ```
 
-The linked tests exercise the real EL0 wrappers, syscall handler, automatic
-task-exit cleanup and malformed buffers, using modeled exception delivery.
+The linked tests issue file calls from isolated EL0 processes, including the
+embedded terminal's editor, and cover copied payloads, automatic cleanup when
+a process exits and malformed requests, using modeled exception entry.
 Physical SD read/write/erase and reboot-persistence acceptance remain pending.
 
 ## Touch events
@@ -361,7 +350,7 @@ See [the terminal guide](TERMINAL.md) for commands and input setup.
   insertion, line navigation/deletion and unsaved-exit confirmation without a
   visible cursor. The disk format and file ABI are unchanged. See
   [the editor contract](TERMINAL.md#persistent-text-files).
-- `user/apps/terminal/app.c` stores mutable state in `.user.bss` on Pi. It polls
+- `user/apps/terminal/app.c` keeps its mutable state in the process's own data. It polls
   at most 64 keyboard and 64 touch events per step and redraws only dirty content.
   On the 480x800 canvas, the keyboard uses 272 pixels, leaving 33 text rows.
 - Keyboard rendering and hit testing share geometry. Ordinary taps commit on
@@ -378,15 +367,16 @@ See [the terminal guide](TERMINAL.md) for commands and input setup.
 
 The shell accepts printable ASCII and has no history, scrollback, cursor
 navigation, Unicode, quoting, pipelines or executable loading. The editor has
-separate touch navigation. The single-app interface provides neither PTYs nor
-process isolation.
+separate touch navigation. The terminal is the only program; there are no
+PTYs and no way to start other programs from it.
 
 `terminal_storage_reboot` exercises create/read/replace/delete using the terminal,
 production syscall wrappers and a disk image across fresh processes. It also
 checks exact-capacity saves, literal dot commands, discard-without-save,
 unmounted-storage errors and buffer retention after a failed save. Linked ARM
-file tests run the editor in a scheduled EL0 task through real SVC wrappers and
-check the user-stack guard. These are software tests, not physical SD acceptance.
+file tests run the editor inside the embedded terminal process, driven by key
+and touch events, and read the saved file back through the kernel. These are
+software tests, not physical SD acceptance.
 `editor_touch` drives SDL touch events through the application to exercise line
 selection, on-screen text input, Save, New/Drop, drag cancellation, exit
 confirmation and persistence after remount. Model tests exercise editor bounds
@@ -430,9 +420,10 @@ With Unicorn/Capstone installed and a fresh AArch64 build:
 python tests/arm/terminal.py /path/to/kernel8.elf -v
 ```
 
-The linked tests cover user-stack guards, syscall validation, memory statistics,
+The linked tests run the embedded terminal as an isolated, preempted EL0
+process and cover its stack bounds, syscall validation, memory statistics,
 copy/zero routines and Del repeat timing, including rollover and empty input.
-Exceptions and devices are mocked. Validate touch coordinates, serial/display
+Exception entry and devices are modeled. Validate touch coordinates, serial/display
 output, scrolling and memory counters on a physical Pi before claiming hardware
 compatibility.
 

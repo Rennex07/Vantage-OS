@@ -7,7 +7,8 @@ emulator. Keep hardware ownership and privilege checks in place when sharing cod
 ## Directory map
 
 ```text
-arch/armv8/            AArch64 boot, exception entry, context switching and MMU
+arch/armv8/            AArch64 boot, exception vectors and trap frames, GIC/timer,
+                       context switching, MMU and per-process translation tables
 include/vantage/
   abi/                Shared syscall numbers, value types and fixed-size payloads
   arch/               Architecture interfaces
@@ -16,11 +17,11 @@ include/vantage/
   platform/pi4/       Pi 4 board interfaces and register definitions
   user.h              Userspace syscall wrappers
 kernel/
-  boot/               Hardware boot coordinator and built-in application launch
+  boot/               Hardware boot coordinator and the embedded terminal image
   fs/                 File handles, snapshot storage and file syscall validation
   mm/                 Firmware discovery, physical pages and kernel heap
   parallel/           Synchronous multicore worker coordination
-  sched/              Cooperative task lifecycle and scheduling
+  sched/              Preemptive task scheduling and the process lifecycle
   syscall/            Common validated syscall dispatcher
   ui/                 Canvas, row rasterization and window geometry
 drivers/
@@ -33,7 +34,8 @@ platform/pi4/         MMIO, clocks, display, SD and storage adapters, driver sta
 lib/                  Canonical freestanding memory primitives
 user/
   apps/terminal/      Terminal/editor model and interactive application
-  lib/                Userspace syscall transport and wrappers
+  lib/                Userspace syscall transport, wrappers and program entry
+  program.ld          Link layout of the separate EL0 program image
 sim/
   platform/           Host display/input and regular-image sector adapters
   tests/              SDL integration and concurrent raster tests
@@ -58,7 +60,12 @@ legacy/               Retained historical examples, excluded from production
   applications call `sys_*` wrappers; they do not call raw drawing/file/MMIO APIs.
 - `kernel/syscall/dispatch.c` validates userspace requests and routes them to
   privileged services. `kernel/fs/file_syscall.c` snapshots file payloads.
-  Keep validation at this boundary; internal file APIs accept trusted buffers.
+  Both copy payloads through `<vantage/kernel/user_access.h>`, which resolves
+  buffers in the calling process's address space. Keep validation at this
+  boundary; internal file APIs accept trusted kernel buffers only.
+- `user/` is a separate program on the Pi: it is linked on its own at user
+  addresses and embedded as a flat image, so it cannot reference kernel
+  symbols. The desktop build links the same sources into the simulator.
 - `kernel/boot/main.c` owns boot sequencing. The desktop build shares the syscall
   dispatcher and app, not the privileged boot coordinator.
 - Portable command engines receive callbacks (`HwOps`, `SdIo`, `SectorDevice`).
@@ -69,9 +76,13 @@ legacy/               Retained historical examples, excluded from production
 - `lib/memory.c` is the production implementation of `memcpy`, `memset`, and
   `memcmp`. Do not introduce competing definitions in drivers or filesystems.
 
-These boundaries do not introduce process isolation, preemption, reentrant
-storage, or new hardware support. See the subsystem guides for lifetime,
-core-affinity, exception-mask and error-recovery requirements.
+On the Pi, user programs run as preempted processes in isolated address
+spaces; see [the scheduler guide](SCHEDULER.md). The kernel itself is not
+preemptible outside explicit regions, so storage, the allocator, the mailbox
+and the renderer stay non-reentrant single-owner services. See the subsystem
+guides for lifetime, core-affinity, exception-mask and error-recovery
+requirements. This is validated on host tests and ARM models; physical Pi
+acceptance is pending.
 
 ## Build entry points
 
@@ -83,7 +94,8 @@ make BUILD_DIR=out/v3d V3D=1
 ```
 
 The output remains `<BUILD_DIR>/prod/kernel8.img` with a linked
-`<BUILD_DIR>/kernel8.elf`. `mk/config.mk` validates opt-in switches;
+`<BUILD_DIR>/kernel8.elf`. The terminal program is linked first as
+`<BUILD_DIR>/user/terminal.elf` and embedded as `user/terminal.bin`. `mk/config.mk` validates opt-in switches;
 `mk/sources.mk` explicitly lists production sources. Add each new `.c`/`.s` there
 exactly once. Do not restore recursive wildcards: they can accidentally link
 test doubles, alternate runtimes or incomplete examples. Configuration stamps

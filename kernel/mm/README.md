@@ -5,8 +5,10 @@ physical pages, and supplies an 8 MiB aligned/coalescing kernel heap. The hardwa
 renderer obtains its back buffer from the heap. It builds with the existing GNU
 AArch64 toolchain.
 
-This is physical-memory and kernel-heap management. It does not implement process
-address spaces, demand paging, swapping, heap growth or GPU command submission.
+This is physical-memory and kernel-heap management. Process address spaces are
+built on top of it by the scheduler's process layer, one page at a time (see
+[the scheduler guide](../../docs/SCHEDULER.md#address-spaces)). There is no
+demand paging, swapping, heap growth or GPU command submission.
 GPU-visible addressing, buffer/cache ownership and completion synchronization
 must be designed for the graphics interface before using these allocations as
 GPU buffers.
@@ -24,13 +26,13 @@ GPU buffers.
    rejection parks the core without initializing UART or writing BSS.
 2. `mm_prepare` parses a bounded DTB and records RAM, its reservation map,
    `/reserved-memory` and `/chosen` initrd ranges. Low memory through `_end`
-   (including metadata, stacks, user data and the secondary-core boot gate), and
-   the DTB itself, are reserved.
+   (including metadata, stacks, the embedded program image and the
+   secondary-core boot gate), and the DTB itself, are reserved.
 3. Firmware allocates the framebuffer. `mm_finalize_framebuffer` reserves its
    **full returned allocation**, rounded outward to 2 MiB mapping boundaries,
    before resolving dynamic reserved-memory pools and their alignment/alloc-range
    constraints. Reusable pools remain reserved.
-4. C builds the immutable identity tables using `mm_block_mapped`. Entire blocks
+4. C builds the immutable, privileged-only identity tables using `mm_block_mapped`. Entire blocks
    outside RAM and those intersecting `no-map` stay invalid, except that firmware
    framebuffer memory can be mapped outside the CPU RAM banks. Conflicting
    `no-map` reservations over the kernel, DTB or framebuffer stop boot. Sub-block
@@ -38,7 +40,8 @@ GPU buffers.
    secondary-core boot gate retains its privileged Device mapping.
 5. The primary enables the MMU/caches and releases the existing MMU-ready gate.
    Secondary cores enable the same tables and enter their workers; they do not
-   access allocator metadata.
+   access allocator metadata. Process tables created later share these kernel
+   entries and never change them.
 6. `mm_init_allocator` initializes out-of-band page metadata and reserves an
    8 MiB page run for the heap. `mm_self_test` checks real memory writes, alignment,
    invalid frees and accounting. The renderer then allocates a zeroed back buffer.
@@ -61,7 +64,11 @@ all DAIF exception masks set. Other cores and unmasked callers are rejected befo
 metadata access. The nonblocking reentry guard uses plain accesses because
 exclusive instructions are unsuitable for MMU-off Device accesses. It is **not a
 multicore lock**. Interrupt-enabled or multicore allocation needs a new ownership
-protocol, not removal of the checks.
+protocol, not removal of the checks. Timer preemption does not change this:
+kernel code runs with interrupts masked, so a tick cannot interrupt an
+allocator call, and interrupt-enabled kernel regions are rejected like any
+other unmasked caller. Process creation and teardown, the only users of
+`mm_alloc_pages`/`mm_free_pages` besides drivers, run on core 0 for this reason.
 
 Workers receive preallocated buffers. Join every user of a buffer before freeing
 it. The existing synchronous parallel dispatcher provides this join for renderer
@@ -101,8 +108,12 @@ successful allocation does not require new metadata.
   lifetime. Discovery runs twice, before BSS clearing and during MM preparation.
 - Nonempty reserved-memory translations and `linux,usable-memory*` crash-kernel
   restrictions are rejected, rather than silently ignored.
-- Existing shared code is still executable at EL0 and EL1. This subsystem does
-  not establish full process isolation or complete W^X separation.
+- The identity tables use 2 MiB blocks: kernel text and constants share one
+  read-only block that is executable at EL1, and every other block is
+  non-executable. No kernel block is accessible or executable from EL0. Finer
+  kernel W^X (separating text from constants) is not implemented.
+- Process pages come from `mm_alloc_pages` one at a time and are not scrubbed
+  when freed; the process layer zeroes every page it maps.
 
 ## Build and validation
 
@@ -147,7 +158,7 @@ thread tests separately exercise the real dispatcher and raster callbacks.
 Privileged registers, firmware, timers and event behavior are mocked. These
 checks do not establish real MMU/cache behavior or Pi hardware compatibility.
 Startup regressions place DTBs and initrd/reserved payload sentinels in BSS,
-the primary stack, user memory and the secondary gate. They require rejection
+the primary stack and the secondary gate. They require rejection
 without writes outside the file-backed bootstrap stack, preservation of the
 original payload bytes, and no stores at all for DTBs overlapping kernel memory.
 

@@ -42,8 +42,10 @@ files. See the [terminal guide](docs/TERMINAL.md) for usage.
 Experimental persistent SD files and the physical Pi validation gate are
 documented in [the storage guide](docs/STORAGE.md).
 
-Four-core cooperative task scheduling, affinity and hardware acceptance are
-documented in [the scheduler guide](docs/SCHEDULER.md).
+Preemptive four-core scheduling, processes with isolated address spaces and
+their hardware acceptance checklist are documented in
+[the scheduler guide](docs/SCHEDULER.md). They are validated on host tests and
+ARM models; physical Pi validation is pending.
 
 For implementation details and tests, see the [developer guide](docs/DEVELOPMENT.md).
 

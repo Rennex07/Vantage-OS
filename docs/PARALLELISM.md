@@ -7,9 +7,10 @@ Workers enter EL1 and wait for immutable shared MMU tables through a Device
 boot gate before using cached job state. A synchronous four-way batch runs one
 slice on every core, including core 0. Large CPU fills and framebuffer copies
 use disjoint rows; core 0 retains input/UART/mailbox/presentation ownership.
-The worker facility also hosts a cooperative four-core task scheduler. During
-task sessions, synchronous raster batches reserve idle workers or use their
-serial fallback rather than wait on occupied task cores. See
+The worker facility also hosts the preemptive four-core task and process
+scheduler. During task sessions, synchronous raster batches reserve idle
+workers or use their serial fallback rather than wait on occupied task cores.
+Batch slices run with interrupts masked and are never preempted. See
 [SCHEDULER.md](SCHEDULER.md). This is not a GPU
 renderer. The original core-1 startup
 was reported working on hardware by the maintainer; the new worker system
@@ -65,50 +66,45 @@ References:
 
 ## Task scheduler and process-management stages
 
-Start with kernel task lifecycle and scheduling, not a graphical task-manager
-application. The kernel schedules trusted cooperative tasks and starts one
-built-in EL0 function; it has no executable loader, timer-driven scheduler or
-per-process address spaces. The existing shared code mapping and single user-memory region
-are not independent process isolation.
+Stages 1 to 3 are implemented in software and described in
+[SCHEDULER.md](SCHEDULER.md). All of it is validated on host tests and ARM
+models only; **physical Pi validation of every stage is pending**.
 
-### 1. Four-core cooperative tasks: implemented, Pi validation pending
+### 1. Four-core tasks: implemented, Pi validation pending
 
 Thirty-two fixed task slots provide create/yield/exit/join/reap, generation-tagged
 IDs and separate privileged stacks. Each of the four cores can claim runnable
-work allowed by its affinity, with migration at voluntary yield/block boundaries.
-Core 0 coordinates global quiescence; existing device tasks stay pinned there.
-EL0 exposes ID/yield/exit only. See [the task contract and tests](SCHEDULER.md).
-Host threads and linked ARM models cover progress, migration, preserved context
-and safe slot reclamation; physical Pi scheduling validation is still required.
+work allowed by its affinity. Core 0 coordinates global quiescence; existing
+device tasks stay pinned there.
 
-### 2. Interrupt foundation and preemption
+### 2. Interrupt foundation and preemption: implemented, Pi validation pending
 
-Add GIC/timer setup, interrupt acknowledgement and safe exception entry before
-preempting tasks. Specify interrupt-safe locking and when scheduling is allowed.
-Save the complete state required by the selected execution mode, including
-exception-return registers and an explicit FP/SIMD ownership policy. Test timer
-interrupts during syscalls and driver operations; do not switch tasks while a
-non-preemptible shared resource is held.
+Each core initializes its GIC-400 CPU interface and virtual timer interrupt.
+Exceptions save a complete frame including SIMD state. A 10 ms tick preempts
+EL0 code and explicit preemptible kernel regions; all other kernel code runs
+masked, so non-preemptible shared resources are never held across a switch.
+The scheduler lock is only taken with interrupts masked.
 
-### 3. Processes and address-space ownership
+### 3. Processes and address-space ownership: implemented, Pi validation pending
 
-Add a physical-page allocator and explicit per-process code/data/stack mappings
-with privileged kernel mappings. Define how syscall buffers are validated
-against the current process, how faults terminate a task safely, and how memory
-is reclaimed. Start with built-in test programs; executable loading can follow
-as a separate filesystem/format change.
+A process owns per-process translation tables with an ASID, its threads, file
+handles and exit status. The kernel is mapped privileged-only. Syscall buffers
+are resolved through the calling process's tables, faults terminate only the
+offending process, and reaping flushes the ASID on every core before freeing
+all memory. The terminal is the one built-in program, linked separately;
+loading executables from storage would be a separate filesystem/format change.
 
-Acceptance: two processes have independent writable memory, valid syscalls work,
-invalid access faults cannot modify protected memory, and exit frees owned
-resources. Verify this on ARM, not only by inspecting page-table descriptors.
+Acceptance on hardware: two processes have independent writable memory, valid
+syscalls work, invalid access faults cannot modify protected memory, a looping
+process is preempted, and exit frees owned resources. The ARM model tests
+check these with real translation tables; they do not replace Pi validation.
 
 ### 4. Further multicore policies
 
 After hardware acceptance, evaluate real workloads before adding priorities,
-per-core run queues or scheduling domains. Process migration will need explicit
-address-space/TLB ownership beyond the current shared-map cooperative model.
-Preserve the no-double-dispatch and safe stack-reclamation invariants when adding
-preemption or changing queue design.
+per-core run queues, sleeping or scheduling domains. Preserve the
+no-double-dispatch, safe stack-reclamation and address-space ownership
+invariants when changing queue design.
 
 GPU rendering is not a prerequisite for this process manager. Each stage should
 be reviewed and validated separately rather than shipped as one large change.
